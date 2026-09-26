@@ -23,7 +23,9 @@ class TorchScriptRunner:
         device: torch.device,
         use_actor_module: bool = False,
     ) -> None:
-        model = torch.jit.load(path, map_location=device)
+        # Python handles Unicode Windows paths that the native loader may reject.
+        with open(path, "rb") as checkpoint:
+            model = torch.jit.load(checkpoint, map_location=device)
         model.to(device).eval()
 
         if use_actor_module:
@@ -124,11 +126,9 @@ class CpuOnnxRunner:
                 {self.input_name: self._input_array},
             )[0]
             output_array = np.asarray(output, dtype=np.float32)
-        if self._output_array is None and (
-            self._output_cpu_tensor is None
-            or tuple(self._output_cpu_tensor.shape) != tuple(output_array.shape)
-        ):
-            # Dynamic output dimensions cannot use a pre-bound output buffer.
+        if self._output_array is None:
+            # session.run returns a new array, even when its shape is unchanged.
+            # Rebind every call so dynamic-batch policies never reuse stale actions.
             self._output_cpu_tensor = torch.from_numpy(output_array)
         if self.device.type == "cpu":
             return self._output_cpu_tensor

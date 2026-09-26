@@ -145,12 +145,12 @@ class LocomotionPolicy(Policy):
         mapped_dof_vel = dof_vel[self.real2sim_joint_map]
 
         return torch.cat([
-            base_ang_vel,
-            projected_gravity,
-            command_obs,
-            mapped_dof_pos - mapped_default_pos,
-            mapped_dof_vel * self.cfg.obs_dof_vel_scale,
-            self.last_action,
+            base_ang_vel,  #绕机身轴的角速度3
+            projected_gravity,  #投影重力3
+            command_obs,   #速度命令3
+            mapped_dof_pos - mapped_default_pos,  #关节位置偏差20
+            mapped_dof_vel * self.cfg.obs_dof_vel_scale,  #目前关节速度_缩放20
+            self.last_action,  #上一次动作20
         ], dim=0)
 
     def inference(self) -> torch.Tensor:

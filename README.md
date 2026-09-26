@@ -1,5 +1,12 @@
 # Booster Deploy
 
+K1 三模型行走任务：`python scripts/deploy.py --task k1_loco --mujoco`。
+模型来源、迁移实现、Windows 启动方式与验证结果见 [K1 loco 迁移说明](docs/k1_loco_migration.md)。
+K1 实机三模型部署：在机器人 ROS 2 环境执行 `python scripts/deploy.py --task k1_loco`，
+具体启动步骤、PD 参数和离线验证范围见 [K1 loco 实机部署](docs/k1_loco_migration.md#实机部署)。
+
+中文源码导读：[代码解读与运控数据流](docs/代码解读与运控数据流.md)，包含阅读路线、实机与仿真控制链路、策略观测与关节映射、启动切换流程及调试定位。
+
 Booster Deploy is a lightweight deployment framework that supports running control policies on Booster robots (sim2real) and MuJoCo (sim2sim). The system adopts many well-established designs from IsaacLab to provide modular abstractions, allowing unified policy execution across simulated and real platforms.
 
 
@@ -90,9 +97,17 @@ make sure `onnxruntime` is installed in the deployment environment.
 
 #### PD damping (`Kd`) on the real robot
 
+Hardware-only gain overrides can be set with
+`booster.joint_stiffness` and `booster.joint_damping`, in `robot.joint_names`
+order. Unset overrides use the corresponding `robot` gains. MuJoCo always uses
+`robot.joint_stiffness` / `robot.joint_damping`.
+`k1_loco` uses the existing `k1_walk` gains as its hardware baseline, while
+retaining its original loco gains in simulation. This does not establish that
+those gains have been validated on hardware with the three loco policies.
+
 For parallel-actuated joints, `robot.joint_damping` is sent directly to the
-motors, so do not reuse the training-simulator `Kd`. Compute the motor-side
-value as:
+motors (after applying any `booster.joint_damping` override), so do not reuse
+the training-simulator `Kd`. Compute the motor-side value as:
 
 ```text
 Kd = 2 * zeta * J_eq * (2 * pi * f_n)
@@ -136,7 +151,9 @@ mode. Set it independently in each robot configuration (T1, T2, or K1):
   switch to Custom, then start the matching robot locomotion policy with all
   velocity commands masked to zero. Press `A` on the remote (or `r` on the
   keyboard) to stop the preparation policy and start the task selected by
-  `--task`.
+  `--task`. For `k1_loco`, preparation already runs the selected three-model
+  policy: `A`/`r` enables velocity commands without reloading models or resetting
+  observation history and action filtering.
 - `"standing"`: publish the current-position hold command, switch to Custom,
   and interpolate for approximately one second to the configured
   `prepare_state.joint_pos`. Press `A`/`r` to start the selected task policy.

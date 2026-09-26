@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from time import sleep
 import select
 import numpy as np
@@ -17,7 +18,19 @@ class MujocoController(BaseController):
         self._paused = False
 
         mjcf_path = self._expand_assets_placeholder(self.robot.cfg.mjcf_path)
-        self.mj_model = mujoco.MjModel.from_xml_path(mjcf_path)
+        if os.name == "nt" and not mjcf_path.isascii():
+            # MuJoCo's native file loader can reject non-ASCII Windows paths.
+            # At initialization (before control threads), load relative to the
+            # model directory and restore cwd even if parsing fails.
+            model_path = os.path.abspath(mjcf_path)
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(os.path.dirname(model_path))
+                self.mj_model = mujoco.MjModel.from_xml_path(os.path.basename(model_path))
+            finally:
+                os.chdir(previous_cwd)
+        else:
+            self.mj_model = mujoco.MjModel.from_xml_path(mjcf_path)
         self.mj_model.opt.timestep = self.cfg.mujoco.physics_dt
         self.decimation = self.cfg.mujoco.decimation
         self.mj_data = mujoco.MjData(self.mj_model)
@@ -135,14 +148,49 @@ class MujocoController(BaseController):
         except Exception:
             return path
 
+    def _read_command_line(self):
+        """Poll stdin on Unix or the console on Windows without blocking physics."""
+        if os.name != "nt":
+            if select.select([sys.stdin], [], [], 0)[0]:
+                return sys.stdin.readline()
+            return None
+        # select() only accepts sockets on Windows, not the console handle.
+        if not sys.stdin.isatty():
+            return None
+        import msvcrt
+        buffer = getattr(self, "_command_line_buffer", "")
+        while msvcrt.kbhit():
+            char = msvcrt.getwch()
+            if char in ("\x00", "\xe0"):
+                msvcrt.getwch()  # discard the second byte of a special key
+                continue
+            if char in ("\r", "\n"):
+                print()
+                self._command_line_buffer = ""
+                return buffer
+            if char == "\b":
+                if buffer:
+                    buffer = buffer[:-1]
+                    print("\b \b", end="", flush=True)
+            elif char.isprintable():
+                buffer += char
+                print(char, end="", flush=True)
+        self._command_line_buffer = buffer
+        return None
+
     def update_vel_command(self):
         cmd: VelocityCommand = self.vel_command
-        if select.select([sys.stdin], [], [], 0)[0]:
+        line = self._read_command_line()
+        if line is not None and line.strip():
             try:
-                parts = sys.stdin.readline().strip().split()
+                parts = line.strip().split()
                 if len(parts) == 3:
-                    (cmd.lin_vel_x, cmd.lin_vel_y, cmd.ang_vel_yaw) = map(float, parts)
-                    cmd.lin_vel_x = cmd.clamp_vx(cmd.lin_vel_x)
+                    vx, vy, yaw = map(float, parts)
+                    if not np.isfinite([vx, vy, yaw]).all():
+                        raise ValueError
+                    cmd.lin_vel_x = cmd.clamp_vx(vx)
+                    cmd.lin_vel_y = float(np.clip(vy, -cmd.vy_max, cmd.vy_max))
+                    cmd.ang_vel_yaw = float(np.clip(yaw, -cmd.vyaw_max, cmd.vyaw_max))
                     print(
                         f"Updated command to: x={cmd.lin_vel_x},"
                         f"y={cmd.lin_vel_y}, yaw={cmd.ang_vel_yaw}\n"

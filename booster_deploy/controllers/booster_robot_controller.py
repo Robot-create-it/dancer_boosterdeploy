@@ -49,9 +49,12 @@ class BoosterRobotPortal:
     exit_event: synchronize.Event
 
     def __init__(self, cfg: ControllerCfg) -> None:
-        self.cfg = cfg
+        # Resolve motor-side gains before preparing or publishing any commands.
+        # Keep the registered task's simulation configuration intact.
+        self.cfg = deepcopy(cfg)
+        self.cfg.robot = self.cfg.booster.apply_to_robot(self.cfg.robot)
 
-        self.robot = BoosterRobot(cfg.robot)
+        self.robot = BoosterRobot(self.cfg.robot)
 
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -507,8 +510,15 @@ class BoosterRobotPortal:
             from tasks.locomotion.robots.t1 import T1WalkControllerCfg1
             walk_cfg = T1WalkControllerCfg1()
         elif "k1" in robot_name:
-            from tasks.locomotion.robots.k1 import K1WalkTaskCfg
-            walk_cfg = K1WalkTaskCfg()
+            from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
+            if isinstance(self.cfg.policy, K1NestedLocomotionPolicyCfg):
+                # Keep the selected loco models, pose and gains during zero-command
+                # preparation; do not silently load the old k1_walk.pt checkpoint.
+                walk_cfg = deepcopy(self.cfg)
+                walk_cfg.policy.forced_route = None
+            else:
+                from tasks.locomotion.robots.k1 import K1WalkTaskCfg
+                walk_cfg = K1WalkTaskCfg()
         else:
             raise RuntimeError(f"No locomotion preparation policy for robot {self.cfg.robot.name!r}")
         prepare_cfg = deepcopy(self.cfg)
@@ -694,7 +704,20 @@ class BoosterRobotPortal:
         controller = BoosterRobotController(cfg, portal)
         controller.run(stop_event=portal.task_start_event if prepare_then_task else None)
         if prepare_then_task and not portal.exit_event.is_set():
-            BoosterRobotController(portal.cfg, portal).run()
+            from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
+
+            if isinstance(cfg.policy, K1NestedLocomotionPolicyCfg) and isinstance(
+                portal.cfg.policy, K1NestedLocomotionPolicyCfg
+            ):
+                # _build_prepare_cfg copies this task, only clearing forced_route.
+                # Keep the three sessions, observation history and action filter
+                # alive across A/r instead of loading and resetting them again.
+                controller.policy.cfg.forced_route = portal.cfg.policy.forced_route
+                controller._velocity_commands_enabled = True
+                portal.logger.info("K1 loco enabled; continuing the prepared policy")
+                controller.run(reset_policy=False)
+            else:
+                BoosterRobotController(portal.cfg, portal).run()
         portal.logger.info("Inference process stopped.")
 
 
@@ -719,10 +742,13 @@ class BoosterRobotController(BaseController):
             self.vel_command.ang_vel_yaw = 0.0
             return
         cmd = self.portal.synced_command.read()[0]
-
-        self.vel_command.lin_vel_x = self.vel_command.scale_vx(cmd["vx"])
-        self.vel_command.lin_vel_y = cmd["vy"] * self.vel_command.vy_max
-        self.vel_command.ang_vel_yaw = cmd["vyaw"] * self.vel_command.vyaw_max
+        normalized = np.array([cmd["vx"], cmd["vy"], cmd["vyaw"]], dtype=float)
+        if not np.isfinite(normalized).all():
+            normalized.fill(0.0)
+        normalized = np.clip(normalized, -1.0, 1.0)
+        self.vel_command.lin_vel_x = self.vel_command.scale_vx(normalized[0])
+        self.vel_command.lin_vel_y = normalized[1] * self.vel_command.vy_max
+        self.vel_command.ang_vel_yaw = normalized[2] * self.vel_command.vyaw_max
 
     def update_state(self) -> None:
         state = self.portal.synced_state.read()[0]
@@ -767,11 +793,12 @@ class BoosterRobotController(BaseController):
         super().stop()
         self.portal.exit_event.set()
 
-    def run(self, stop_event=None):
+    def run(self, stop_event=None, *, reset_policy: bool = True):
         self.update_state()
         if self.vel_command is not None:
             self.update_vel_command()
-        self.start()
+        if reset_policy:
+            self.start()
         next_inference_time = time.perf_counter()
         while (
             self.is_running
@@ -779,7 +806,8 @@ class BoosterRobotController(BaseController):
             and not (stop_event is not None and stop_event.is_set())
         ):
             if (
-                not self._velocity_commands_enabled
+                stop_event is None
+                and not self._velocity_commands_enabled
                 and self.portal.velocity_commands_enabled_event.is_set()
             ):
                 self._velocity_commands_enabled = True
@@ -793,6 +821,8 @@ class BoosterRobotController(BaseController):
                 self.update_vel_command()
             self.portal.metrics["policy_step"].mark()
             dof_targets = self.policy_step()
+            if not self.is_running or self.portal.exit_event.is_set():
+                break
             self.ctrl_step(dof_targets)
 
         if stop_event is None:

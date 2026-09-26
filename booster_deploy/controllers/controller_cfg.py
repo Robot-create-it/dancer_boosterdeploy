@@ -1,5 +1,6 @@
 from typing import Callable, List, Optional
 from dataclasses import MISSING
+import math
 import torch
 
 from ..utils.isaaclab.configclass import configclass
@@ -34,6 +35,21 @@ class BoosterRobotControllerCfg:
     metrics_max_events: int = 2000
     # Mode to enter after Custom control exits. Supported values: "walking", "damping".
     exit_mode: str = "walking"
+    # Optional motor-side gains for the real robot; simulation uses RobotCfg.
+    joint_stiffness: Optional[List[float]] = None
+    joint_damping: Optional[List[float]] = None
+
+    def apply_to_robot(self, robot: "RobotCfg") -> "RobotCfg":
+        overrides = {}
+        for name in ("joint_stiffness", "joint_damping"):
+            values = getattr(self, name)
+            if values is not None:
+                if len(values) != len(robot.joint_names) or any(
+                    not math.isfinite(value) or value < 0 for value in values
+                ):
+                    raise ValueError(f"booster.{name} must contain one finite, non-negative gain per joint")
+                overrides[name] = list(values)
+        return robot.replace(**overrides)
 
 
 @configclass

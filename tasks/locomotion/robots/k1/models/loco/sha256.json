@@ -1,0 +1,5 @@
+{
+  "k1_loco_base.onnx": "5e92142900bacfa7e396cce5410fd3e6eaa0d945df39db66532cdc4ce34be919",
+  "k1_loco_side.onnx": "11f6b63ca4478e4a3905da20aab7ae3705d3e9db789fa577002365e9cdb040e2",
+  "k1_loco_turn.onnx": "0de23148c32fef0619f7a63771b895170b9ca4a9997f9e303a5e053777153e34"
+}
