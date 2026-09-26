@@ -1,4 +1,4 @@
-"""Standalone task configuration using the copied demo loco runtime settings."""
+"""Standalone K1 loco task using the demo models and walk-style inputs."""
 
 import json
 from pathlib import Path
@@ -22,11 +22,16 @@ _PATHS = ["robots/k1/models/" + path for path in _LOCO["model_files"]]
 @configclass
 class K1LocoTaskCfg(ControllerCfg):
     policy_dt = _LOCO["update_interval"]
-    # Reuse the existing K1 walk deployment gains on hardware. These are a
-    # configuration baseline, not a claim of hardware validation for loco.
+    # Match the loco ankle gains on hardware; retain walk gains elsewhere.
     booster = BoosterRobotControllerCfg(
-        joint_stiffness=list(_ROBOT.joint_stiffness),
-        joint_damping=list(_ROBOT.joint_damping),
+        joint_stiffness=[
+            _LOCO["kp_22"][i] if "_ankle_" in name else _ROBOT.joint_stiffness[i]
+            for i, name in enumerate(_ROBOT.joint_names)
+        ],
+        joint_damping=[
+            _LOCO["kd_22"][i] if "_ankle_" in name else _ROBOT.joint_damping[i]
+            for i, name in enumerate(_ROBOT.joint_names)
+        ],
     )
     robot = _ROBOT.replace(
         default_joint_pos=_LOCO["default_dof_pos_22"],
@@ -50,11 +55,8 @@ class K1LocoTaskCfg(ControllerCfg):
         obs_dof_vel_scale=_LOCO["dof_velocity_scale"],
         clip_action=_LOCO["clip_action"],
         clip_observation=_LOCO["clip_observation"],
-        gravity_offset=_LOCO["gravity_offset"],
         max_vel_cmd=_LOCO["max_vel_cmd"],
         min_vel_cmd=_LOCO["min_vel_cmd"],
-        max_vel_cmd_incre=_LOCO["max_vel_cmd_incre"],
-        max_vel_cmd_decre=_LOCO["max_vel_cmd_decre"],
         update_interval=_LOCO["update_interval"],
     )
 

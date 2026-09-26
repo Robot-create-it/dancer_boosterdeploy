@@ -1,4 +1,4 @@
-"""K1 base/side/turn locomotion ported from dancer-robocupdemo's loco_policy.cpp."""
+"""K1 base/side/turn locomotion with walk-style command and gravity input."""
 
 from __future__ import annotations
 
@@ -22,14 +22,13 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 class LocoCommandProcessor:
-    """Stateful ProcessCmd/SelectModel; Python floats preserve C++ double state."""
+    """Shape commands and select a model without a velocity ramp."""
 
     def __init__(self, cfg: K1NestedLocomotionPolicyCfg):
         self.cfg = cfg
         self.reset()
 
     def reset(self) -> None:
-        self.previous = [0.0, 0.0, 0.0]
         self.processed = [0.0, 0.0, 0.0]
 
     def process(self, command, adjust: bool = False) -> list[float]:
@@ -37,20 +36,11 @@ class LocoCommandProcessor:
         command = [float(v) for v in command]
         if not all(math.isfinite(v) for v in command):
             command = [0.0, 0.0, 0.0]
-        if not all(math.isfinite(v) for v in self.previous):
-            self.previous = [0.0, 0.0, 0.0]
         if adjust:
-            self.previous = [0.0, 0.0, 0.0]
-            self.processed = [0.0, 0.0, 0.2]
+            self.processed = [0.0, 0.0, 0.0]
             return self.processed.copy()
 
-        for i in range(3):
-            self.previous[i] += _clamp(
-                command[i] - self.previous[i],
-                -cfg.max_vel_cmd_decre[i] * cfg.update_interval,
-                cfg.max_vel_cmd_incre[i] * cfg.update_interval,
-            )
-        vx, vy, wz = self.previous
+        vx, vy, wz = command
         # These constraints are cumulative, not mutually exclusive bands.
         for threshold, low_y, high_y, max_yaw in (
             (0.1, -0.20, 0.25, 1.0),
@@ -61,15 +51,12 @@ class LocoCommandProcessor:
             if vx > threshold:
                 vy = _clamp(vy, low_y, high_y)
                 wz = _clamp(wz, -max_yaw, max_yaw)
-        self.previous[1:] = [vy, wz]
-
         ax, ay = abs(vx), abs(vy)
         lateral_cap = math.inf if ax < 0.001 else (0.20 if vx >= 0 else 0.05) / ax
         yaw_cap = min(
             math.inf if ax < 0.001 else (0.8 if vx >= 0 else 0.4) / ax,
             math.inf if ay < 0.001 else 0.4 / ay,
         )
-        # Final clamps deliberately do not overwrite the rate-limiter state.
         self.processed = [
             _clamp(vx, cfg.min_vel_cmd[0], cfg.max_vel_cmd[0]),
             _clamp(vy, max(-lateral_cap, cfg.min_vel_cmd[1]),
@@ -83,7 +70,7 @@ class LocoCommandProcessor:
         if self.cfg.forced_route is not None:
             return self.cfg.forced_route
         if adjust:
-            return 2
+            return 0
         vx, vy, wz = map(abs, self.processed)
         if vy > 0.1 and vx < 0.2 and wz < 0.2:
             return 1
@@ -112,7 +99,6 @@ class K1NestedLocomotionPolicy(LocomotionPolicy):
                 model_path = Path(self.task_path) / model_path
             self.models.append(create_policy_runner(str(model_path), self.device))
         self.command_processor = LocoCommandProcessor(cfg)
-        self.gravity_offset = torch.tensor(cfg.gravity_offset, device=self.device)
         self.reset()
         logger.info("Loaded K1 loco base/side/turn policies; initial route=base")
 
@@ -133,7 +119,6 @@ class K1NestedLocomotionPolicy(LocomotionPolicy):
                         _ROUTE_NAMES[route], *processed)
         self.active_route = route
         observation = super().compute_observation()
-        observation[3:6] += self.gravity_offset
         observation[6:9] = torch.tensor(processed, dtype=observation.dtype, device=self.device)
         return observation
 
@@ -148,10 +133,7 @@ class K1NestedLocomotionPolicyCfg(K1LocomotionPolicyCfg):
     use_actor_module: bool = False
     arm_action_fix_offset: float = 0.0
     arm_action_fix_joint_name: str | None = None
-    gravity_offset: list[float] = [0.015, 0.0, 0.0]
     max_vel_cmd: list[float] = [1.5, 0.4, 1.8]
     min_vel_cmd: list[float] = [-0.7, -0.4, -1.8]
-    max_vel_cmd_incre: list[float] = [1.3, 1.2, 2.0]
-    max_vel_cmd_decre: list[float] = [1.6, 1.2, 2.0]
     update_interval: float = 0.02
     forced_route: int | None = None

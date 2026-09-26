@@ -94,16 +94,21 @@ def make_portal(cfg):
 
 
 class RobotConfigurationTests(unittest.TestCase):
-    def test_hardware_uses_walk_gains_without_mutating_simulation(self):
+    def test_hardware_uses_loco_ankle_gains_without_mutating_other_tasks(self):
         cfg, walk = K1LocoTaskCfg(), K1WalkTaskCfg()
         portal = make_portal(cfg)
-        self.assertEqual(portal.cfg.robot.joint_stiffness, walk.robot.joint_stiffness)
+        expected_kp = list(walk.robot.joint_stiffness)
+        for i in (14, 15, 20, 21):
+            expected_kp[i] = 50.
+            self.assertEqual(walk.robot.joint_stiffness[i], 65.)
+            self.assertEqual(portal.cfg.robot.joint_damping[i], 1.)
+        self.assertEqual(portal.cfg.robot.joint_stiffness, expected_kp)
         self.assertEqual(portal.cfg.robot.joint_damping, walk.robot.joint_damping)
         self.assertEqual(cfg.robot.joint_stiffness[0], 20.)
         self.assertEqual(cfg.robot.joint_stiffness[14], 50.)
         self.assertEqual(cfg.robot.joint_damping[0], 2.)
         prepared = portal._build_prepare_cfg()
-        self.assertEqual(prepared.robot.joint_stiffness, walk.robot.joint_stiffness)
+        self.assertEqual(prepared.robot.joint_stiffness, expected_kp)
         self.assertEqual(prepared.policy.model_paths, cfg.policy.model_paths)
         self.assertIsNone(prepared.policy.forced_route)
         self.assertEqual(prepared.robot.default_joint_pos, cfg.robot.default_joint_pos)
@@ -208,7 +213,10 @@ class RobotInferenceTests(unittest.TestCase):
         self.assertEqual(routes, {0, 1, 2})
         self.assertTrue(p.low_state_received_event.is_set())
         self.assertEqual(p.low_cmd_publisher.publish.call_count, 160)
-        np.testing.assert_allclose([m.kp for m in p.motor_cmd], K1WalkTaskCfg().robot.joint_stiffness)
+        expected_kp = list(K1WalkTaskCfg().robot.joint_stiffness)
+        for i in (14, 15, 20, 21):
+            expected_kp[i] = 50.
+        np.testing.assert_allclose([m.kp for m in p.motor_cmd], expected_kp)
         np.testing.assert_allclose([m.kd for m in p.motor_cmd], K1WalkTaskCfg().robot.joint_damping)
 
     def test_stop_during_inference_does_not_publish_another_command(self):
@@ -258,7 +266,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(routes[:3], [0, 0, 0])
         self.assertEqual(routes[3:], [2, 2, 2, 2])
         self.assertEqual(commands[:3], [[0, 0, 0]] * 3)
-        self.assertAlmostEqual(commands[3][1], 0.024)
+        self.assertAlmostEqual(commands[3][1], 0.2)
         np.testing.assert_allclose(histories[3][:-1], histories[2][1:])
         # Last-action observation survives the A/r transition.
         np.testing.assert_allclose(histories[3][-1, 49:69],

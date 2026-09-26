@@ -29,24 +29,19 @@ class CommandTests(unittest.TestCase):
         self.cfg = K1LocoTaskCfg().policy
         self.processor = LocoCommandProcessor(self.cfg)
 
-    def test_demo_ramp_and_coupling_examples(self):
+    def test_direct_command_and_coupling_examples(self):
         p = self.processor
-        self.assertAlmostEqual(p.process([1.5, 0, 0])[0], 0.026)
-        for _ in range(9):
-            p.process([1.5, 0, 0])
-        self.assertAlmostEqual(p.processed[0], 0.26)
-        self.assertAlmostEqual(p.process([0, 0, 0])[0], 0.228)
-        for _ in range(300):
-            p.process([1.5, 0, 1.8])
+        self.assertAlmostEqual(p.process([1.5, 0, 0])[0], 1.5)
+        self.assertEqual(p.process([0, 0, 0]), [0, 0, 0])
+        p.process([1.5, 0, 1.8])
         np.testing.assert_allclose(p.processed, [1.5, 0, 0.8 / 1.5])
         self.assertEqual(p.select_route(), 0)
         # Negative vx uses a tighter lateral coupling coefficient of 0.05.
         p.reset()
-        for _ in range(300):
-            p.process([-0.5, 0.4, 1.8])
+        p.process([-0.5, 0.4, 1.8])
         np.testing.assert_allclose(p.processed, [-0.5, 0.1, 0.8])
 
-    def test_demo_routes_after_ramping(self):
+    def test_routes_on_first_command(self):
         cases = [([0.8, 0, 0.05], 0), ([0, 0.3, 0], 1),
                  ([0, -0.3, 0], 1), ([0, 0, 0.5], 2),
                  ([0, 0, -0.5], 2), ([-0.5, 0, 0], 0),
@@ -54,8 +49,7 @@ class CommandTests(unittest.TestCase):
         for cmd, expected in cases:
             with self.subTest(cmd=cmd):
                 self.processor.reset()
-                for _ in range(120):
-                    self.processor.process(cmd)
+                self.processor.process(cmd)
                 self.assertEqual(self.processor.select_route(), expected)
 
     def test_strict_thresholds_adjust_and_nonfinite(self):
@@ -66,11 +60,11 @@ class CommandTests(unittest.TestCase):
                            ([0, 0.15, 0.15], 1)]:
             p.processed = cmd
             self.assertEqual(p.select_route(), route)
-        self.assertEqual(p.process([1, 0, 0], adjust=True), [0, 0, 0.2])
-        self.assertEqual(p.previous, [0, 0, 0])
-        self.assertEqual(p.select_route(adjust=True), 2)
-        self.cfg.forced_route = 0
+        self.assertEqual(p.process([1, 0, 0], adjust=True), [0, 0, 0])
         self.assertEqual(p.select_route(adjust=True), 0)
+        self.cfg.forced_route = 2
+        self.assertEqual(p.select_route(adjust=True), 2)
+        self.cfg.forced_route = None
         p.reset()
         self.assertEqual(p.process([float('nan'), 0.3, 0]), [0, 0, 0])
 
@@ -128,7 +122,7 @@ class InferenceTests(unittest.TestCase):
                     self.assertFalse(np.array_equal(previous, result))
                 previous = result.copy()
 
-    def test_all_actors_against_demo_observation_and_target_equations(self):
+    def test_all_actors_against_updated_observation_and_target_equations(self):
         c, p = self.controller, self.controller.policy
         # Reference follows source JSON index arrays rather than deploy's name mapping.
         body = np.array(CONFIG['body_dof_indices_20'])
@@ -152,7 +146,7 @@ class InferenceTests(unittest.TestCase):
             c.robot.data.root_ang_vel_b = torch.tensor(gyro, dtype=torch.float32)
             w, x, y, z = quat
             gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), 2*(x*x+y*y)-1])
-            frame = np.concatenate([gyro, gravity + CONFIG['gravity_offset'], [0, 0, 0],
+            frame = np.concatenate([gyro, gravity, [0, 0, 0],
                                     (q-default)[body][order], dq[body][order]*0.1, last_action])
             frame = np.clip(frame, -100, 100).astype(np.float32)
             history = np.tile(frame, (10, 1)) if history is None else np.vstack([history[1:], frame])
@@ -170,7 +164,7 @@ class InferenceTests(unittest.TestCase):
             last_action, last_target = action.copy(), target.copy()
         p.reset()
         self.assertIsNone(p.obs_history)
-        self.assertEqual(p.command_processor.previous, [0, 0, 0])
+        self.assertEqual(p.command_processor.processed, [0, 0, 0])
         np.testing.assert_array_equal(p.last_action.numpy(), np.zeros(20))
         np.testing.assert_allclose(p.filtered_dof_target.numpy(), default)
 
@@ -178,13 +172,18 @@ class InferenceTests(unittest.TestCase):
         c, p = self.controller, self.controller.policy
         c.vel_command.lin_vel_y = 0.3
         c.policy_step()
-        self.assertAlmostEqual(p.command_processor.processed[1], 0.024)
-        self.assertEqual(p.active_route, 0)
-        for _ in range(4):
-            c.policy_step()
-        self.assertAlmostEqual(p.command_processor.processed[1], 0.12)
+        self.assertAlmostEqual(p.command_processor.processed[1], 0.3)
         self.assertEqual(p.active_route, 1)
-        np.testing.assert_allclose(p.obs_history[-1, 6:9].numpy(), [0, 0.12, 0], atol=1e-7)
+        np.testing.assert_allclose(p.obs_history[-1, 6:9].numpy(), [0, 0.3, 0], atol=1e-7)
+        np.testing.assert_allclose(p.obs_history[-1, 3:6].numpy(), [0, 0, -1], atol=1e-7)
+
+    def test_adjust_keeps_base_model_and_zero_command(self):
+        c, p = self.controller, self.controller.policy
+        c.vel_command.ang_vel_yaw = 0.5
+        p.loco_adjust = True
+        c.policy_step()
+        self.assertEqual(p.active_route, 0)
+        np.testing.assert_allclose(p.obs_history[-1, 6:9].numpy(), [0, 0, 0], atol=1e-7)
 
 
 @unittest.skipUnless(importlib.util.find_spec('mujoco') and importlib.util.find_spec('booster_assets'),

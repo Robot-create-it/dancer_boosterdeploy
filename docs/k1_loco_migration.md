@@ -55,7 +55,7 @@ Windows 仿真需要 torch、numpy、scipy、onnxruntime、mujoco 和 booster_as
 | `tasks/locomotion/robots/k1/models/loco/*.onnx` | 原样复制 base、side、turn |
 | `tasks/locomotion/robots/k1/loco_config.json` | 原 JSON 的完整 `loco` 字段 |
 | `tasks/locomotion/nested_locomotion.py` | Python 命令处理、模型选择、共享历史策略 |
-| `tasks/locomotion/robots/k1/loco.py` | 从 JSON 构造策略和仿真参数；实机 PD 沿用 walk，注册 `k1_loco` |
+| `tasks/locomotion/robots/k1/loco.py` | 从 JSON 构造策略和仿真参数；实机踝部 PD 使用 loco，其余沿用 walk，注册 `k1_loco` |
 | `booster_deploy/utils/policy_runner.py` | 修复动态输出形状下的旧数组缓存，以及 TorchScript 中文路径加载 |
 | `booster_deploy/controllers/booster_robot_controller.py` | 实机 PD 覆盖、遥控输入、loco 准备到正式运行的连续交接 |
 | `booster_deploy/controllers/controller_cfg.py` | 可选实机 PD 参数及长度、数值检查 |
@@ -71,12 +71,11 @@ Windows 仿真需要 torch、numpy、scipy、onnxruntime、mujoco 和 booster_as
 
 ## 命令处理和路由
 
-每 0.02 秒执行一次命令处理，按顺序保留源代码的非有限数处理、每轴变化率限制、
-随前进速度变化的侧移/转向包络、最终限幅和耦合约束。
-内部限速状态与最终命令分开保存，最终耦合限幅不反写内部状态。
+每 0.02 秒执行一次命令处理。与 `k1_walk` 一样，速度命令直接进入处理流程，
+不再经过源代码的每轴变化率限制。仍保留非有限数处理、随前进速度变化的
+侧移/转向包络、最终限幅和耦合约束。
 
 - 最大命令 `[1.5, 0.4, 1.8]`，最小命令 `[-0.7, -0.4, -1.8]`。
-- 正向变化率上限 `[1.3, 1.2, 2.0]`，负向变化率上限 `[1.6, 1.2, 2.0]`。
 - 模型选择和观测使用同一个处理结果，每周期只处理一次。
 
 以下条件使用处理后速度的绝对值，按顺序判断：
@@ -90,8 +89,8 @@ Windows 仿真需要 torch、numpy、scipy、onnxruntime、mujoco 和 booster_as
 模型在初始化时加载，每周期只推理其中一个。调试固定模型可在构造控制器前设置
 `cfg.policy.forced_route = 0/1/2`，默认 `None` 自动选择。本移植没有读取
 `K1_LOCO_MODEL` 环境变量；用配置字段显式指定。
-`policy.loco_adjust = True` 会注入 `(0, 0, 0.2)` 并选择 turn；默认关闭，reset 后关闭。
-与源代码相同，显式固定模型的优先级高于 adjust。
+`policy.loco_adjust = True` 会注入零速度命令并选择 base；默认关闭，reset 后关闭。
+显式固定模型的优先级高于 adjust。
 
 ## 观测、动作和 PD
 
@@ -102,8 +101,11 @@ Windows 仿真需要 torch、numpy、scipy、onnxruntime、mujoco 和 booster_as
 角速度3，投影重力3，处理后命令3，关节位置偏差20，关节速度20，上一次动作20
 ```
 
-保留 10 帧，从旧到新排列；首帧重复填满。关节速度缩放为 0.1，重力观测加
-`[0.015, 0, 0]`，观测裁剪到 ±100。deploy 状态已是弧度制，不重复做角度转换。
+保留 10 帧，从旧到新排列；首帧重复填满。关节速度缩放为 0.1，
+重力观测与 `k1_walk` 一样使用原始投影重力，不再加偏移，观测裁剪到 ±100。
+deploy 状态已是弧度制，不重复做角度转换。
+这三处输入行为已与原 demo 配置不同；离线测试不能确认模型在实机上对零偏移
+和即时速度命令的稳定性。
 关节顺序根据 JSON 的 `body_dof_indices_20` 和 `webots_to_lab_idx` 生成名称列表。
 
 三个模型共享观测历史、上一动作和目标位置滤波状态，路由切换不 reset。
@@ -180,18 +182,19 @@ python scripts/deploy.py --task k1_loco
 
 ### 实机 PD 来源
 
-`k1_loco` 在 `booster.joint_stiffness/joint_damping` 中复制当前
-`K1WalkControllerCfg` 的运行参数。Portal 在构造实机控制器前应用这些覆盖；
+`k1_loco` 在 `booster.joint_stiffness/joint_damping` 中使用 loco JSON 的双侧
+踝 pitch/roll 参数（50/1），其余关节复制当前 `K1WalkControllerCfg` 的运行参数。
+Portal 在构造实机控制器前应用这些覆盖；
 仿真仍使用 JSON 中的 PD，不会因实机覆盖发生改变。
 
-| 关节组 | 实机 Kp/Kd（沿用 walk） | 仿真 Kp/Kd（loco JSON） |
+| 关节组 | 实机 Kp/Kd | 仿真 Kp/Kd（loco JSON） |
 |---|---|---|
 | 头部 | 4 / 1 | 20 / 2 |
 | 双臂 | 20 / 2 | 20 / 2 |
 | 髋、膝 | 100 / 2 | 100 / 2 |
-| 踝 pitch/roll | 65 / 1 | 50 / 1 |
+| 踝 pitch/roll | 50 / 1 | 50 / 1 |
 
-关节顺序、默认姿态和配置中的力矩限制在两个任务中一致。这里只复用 walk 的 PD，
+关节顺序、默认姿态和配置中的力矩限制在两个任务中一致。踝部以外复用 walk 的 PD，
 不会启用 walk 的模型、观测排列或右肘动作修正。模式切换时的首次位置保持仍使用
 K1 配置中的 `prepare_state.stiffness/damping`，与策略运行 PD 分开。
 `effort_limit` 在现有实机发布函数中不做 Python 侧力矩裁剪。
@@ -208,12 +211,12 @@ K1 配置中的 `prepare_state.stiffness/damping`，与策略运行 PD 分开。
 .\.venv\Scripts\python.exe -X utf8 scripts/check_k1_loco.py --seconds 5 --real-robot-gains --output logs/k1_loco_walk_pd_smoke.json
 ```
 
-9 项回归检查已通过，覆盖：源测试中的速度斜坡/耦合实例、路由边界、adjust、非有限数、
+10 项回归检查已通过，覆盖：直接速度命令与耦合实例、路由边界、adjust、非有限数、
 三个真实模型的连续推理、根据源索引与方程独立构造的观测/动作参考、跨模型历史连续性、
 reset、新旧任务准备配置、模型 SHA-256，以及 Windows 终端输入和三轴限幅。
 数值参考对照容差为 3e-5；没有编译运行源 C++。
 
-实机接入另增加 7 项检查，合计 16 项通过。使用实际实机控制器代码及三个真实 ONNX，
+实机接入另增加 7 项检查，合计 17 项通过。使用实际实机控制器代码及三个真实 ONNX，
 以内存消息/发布器替代 ROS 和共享内存：覆盖 `/low_state` 回调、RPY 转四元数、
 归一化遥控缩放、零命令准备、三模型自动切换、22 关节输出及 PD、A/r 连续交接、
 无效 PD 拒绝和停止后不继续发布。160 个连续策略周期与共享仿真策略的观测、
@@ -221,7 +224,7 @@ reset、新旧任务准备配置、模型 SHA-256，以及 Windows 终端输入�
 
 `--real-robot-gains` 仅让 MuJoCo 使用实机配置的 PD 做闭环检查，不连接机器人，
 也不模拟固件内部的并联电机转换。
-沿用 walk PD 的 40 秒检查也已通过全部 8 个阶段，最低基座高度约 0.528 m，
+调整踝部增益之前，沿用 walk PD（踝部 65/1）的 40 秒检查通过全部 8 个阶段，最低基座高度约 0.528 m，
 最低直立余弦约 0.996，报告见 `logs/k1_loco_walk_pd_smoke.json`。
 原 loco 仿真 PD 的本次回归报告见 `logs/k1_loco_sim2real_regression.json`。
 
