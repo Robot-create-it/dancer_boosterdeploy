@@ -4,6 +4,23 @@ import math
 from dataclasses import dataclass
 
 
+class MotionBallMemory:
+    """Last valid raw XY for a kick actor, matching demo SimMotion's latch.
+
+    Missing observations do not expire the reference. Keep this separate from
+    fresh BallObservation/bbox data used by the head tracker. Store coordinates
+    before model offsets/normalisation so those are applied only once per frame.
+    """
+
+    def __init__(self):
+        self.position: tuple[float, float] | None = None
+
+    def update(self, ball: tuple[float, float] | None):
+        if ball is not None and all(math.isfinite(value) for value in ball):
+            self.position = (float(ball[0]), float(ball[1]))
+        return self.position
+
+
 @dataclass(frozen=True)
 class BallObservation:
     x: float

@@ -30,11 +30,8 @@ class VisionTests(unittest.TestCase):
 
 
 class PassTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.controller = BaseController(K1PassTaskCfg())
-
     def setUp(self):
+        self.controller = BaseController(K1PassTaskCfg())
         self.controller.robot.data.joint_pos = self.controller.robot.default_joint_pos.clone()
         self.controller.robot.data.joint_vel.zero_()
         self.controller.robot.data.root_quat_w = torch.tensor([1., 0., 0., 0.])
@@ -54,7 +51,7 @@ class PassTests(unittest.TestCase):
         torch.testing.assert_close(frame[66:], expected)
         self.assertEqual(policy.compute_observation()[-1].item(), -1.0)
 
-    def test_power_two_actor_and_lost_ball_hold(self):
+    def test_power_two_actor_continues_with_last_ball(self):
         cfg = self.controller.cfg
         self.assertEqual(cfg.robot.joint_stiffness[10], 100.0)
         self.assertEqual(cfg.robot.joint_damping[14], 1.0)
@@ -64,9 +61,11 @@ class PassTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(targets).all())
         self.assertEqual(tuple(self.controller.policy.obs_history.shape), (10, 71))
         self.ball = None
-        held = self.controller.policy_step()
-        torch.testing.assert_close(held, self.controller.robot.data.joint_pos)
-        self.assertIsNone(self.controller.policy.obs_history)
+        targets = self.controller.policy_step()
+        self.assertTrue(torch.isfinite(targets).all())
+        self.assertEqual(self.controller.policy.frame_count, 2)
+        torch.testing.assert_close(self.controller.policy.obs_history[-1, 66:],
+                                   torch.tensor([1.2, 1.6, 0.6, 0.8, -1.0]))
 
     def test_walking_preparation_uses_nested_loco(self):
         source = (Path(__file__).resolve().parents[1] /

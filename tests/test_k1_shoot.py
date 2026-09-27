@@ -18,11 +18,8 @@ from tasks.locomotion.robots.k1.shooting import (
 
 
 class ShootTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.controller = BaseController(K1ShootTaskCfg())
-
     def setUp(self):
+        self.controller = BaseController(K1ShootTaskCfg())
         self.controller.robot.data.joint_pos = self.controller.robot.default_joint_pos.clone()
         self.controller.robot.data.joint_vel.zero_()
         self.controller.robot.data.root_quat_w = torch.tensor([1., 0., 0., 0.])
@@ -57,7 +54,7 @@ class ShootTests(unittest.TestCase):
         torch.testing.assert_close(frame[66:], expected)
         self.assertEqual(policy.compute_observation()[-1].item(), -1.0)
 
-    def test_power_six_actor_and_lost_ball_hold(self):
+    def test_power_six_actor_continues_with_last_ball(self):
         cfg = self.controller.cfg
         self.assertEqual(cfg.policy.kick_power, 6.0)
         self.assertEqual(cfg.robot.joint_stiffness[10], 100.0)
@@ -68,9 +65,13 @@ class ShootTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(targets).all())
         self.assertEqual(tuple(self.controller.policy.obs_history.shape), (10, 71))
         self.ball = None
-        held = self.controller.policy_step()
-        torch.testing.assert_close(held, self.controller.robot.data.joint_pos)
-        self.assertIsNone(self.controller.policy.obs_history)
+        previous = self.controller.policy.obs_history[-1].clone()
+        targets = self.controller.policy_step()
+        self.assertTrue(torch.isfinite(targets).all())
+        self.assertEqual(self.controller.policy.frame_count, 2)
+        torch.testing.assert_close(self.controller.policy.obs_history[-1, 66:70],
+                                   previous[66:70])
+        self.assertEqual(self.controller.policy.obs_history[-1, 70].item(), -1.0)
 
     def test_each_shoot_model_uses_its_own_offsets_and_runs(self):
         expected = {

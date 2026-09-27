@@ -7,11 +7,12 @@ import math
 import torch
 
 from booster_deploy.utils.isaaclab.configclass import configclass
+from booster_deploy.utils.vision_ball import MotionBallMemory
 from .locomotion import K1LocomotionPolicyCfg, LocomotionPolicy
 
 
 class K1ShootPolicy(LocomotionPolicy):
-    """Run the selected shoot actor on fresh robot-frame ball coordinates."""
+    """Run the selected shoot actor with the demo's last-valid-ball input."""
 
     def __init__(self, cfg: K1ShootPolicyCfg, controller):
         if len(cfg.policy_joint_names) != 20 or cfg.actor_obs_history_length != 10:
@@ -21,19 +22,25 @@ class K1ShootPolicy(LocomotionPolicy):
         super().__init__(cfg, controller)
         self.frame_count = 0
         self._current_ball = None
+        self.ball_memory = MotionBallMemory()
 
     def reset(self) -> None:
         super().reset()
         self.frame_count = 0
         self._current_ball = None
+        # The motion-layer ball latch survives policy resets, as in the demo.
+
+    def _get_ball_reference(self):
+        return self.ball_memory.update(
+            self.controller.get_ball_position(self.cfg.ball_max_age))
 
     def compute_observation(self) -> torch.Tensor:
         loco = super().compute_observation()
         ball = self._current_ball
         if ball is None:
-            ball = self.controller.get_ball_position(self.cfg.ball_max_age)
+            ball = self._get_ball_reference()
         if ball is None:
-            raise RuntimeError("K1 shoot observation requires a fresh vision ball")
+            raise RuntimeError("K1 shoot observation requires an initial valid ball")
         raw_bx, raw_by = ball
         # Match pass's ball-facing test direction. Each selected shoot route
         # adds its own yaw and ball offsets before building the actor frame.
@@ -52,8 +59,9 @@ class K1ShootPolicy(LocomotionPolicy):
         return torch.cat((loco[:6], loco[9:], command))
 
     def inference(self) -> torch.Tensor:
-        ball = self.controller.get_ball_position(self.cfg.ball_max_age)
+        ball = self._get_ball_reference()
         if ball is None:
+            # Only before acquisition; later missing frames use the last ball.
             LocomotionPolicy.compute_observation(self)
             self.reset()
             return self.robot.data.joint_pos.clone()
@@ -69,7 +77,7 @@ class K1ShootPolicy(LocomotionPolicy):
 @configclass
 class K1ShootPolicyCfg(K1LocomotionPolicyCfg):
     constructor = K1ShootPolicy
-    ball_max_age: float = 0.5
+    ball_max_age: float = 0.5  # new observations only; cached XY does not expire
     kick_power: float = 6.0
     # Default route 0 of the demo's shoot family is k1_shoot_policy_2.onnx.
     ball_pos_offset: tuple[float, float] = (0.0, -0.05)

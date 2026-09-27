@@ -130,6 +130,24 @@ class HeadControllerTests(unittest.TestCase):
             self.portal._vision_handler(detection(100., []))
             self.assertIsNone(self.controller.get_ball_position(.5))
 
+    def test_motion_retains_ball_while_head_rejects_missing_and_stale_data(self):
+        with patch.object(ROBOT.time, 'monotonic', return_value=20.):
+            self.portal._vision_handler(detection(99.9))
+            self.controller.start()
+            self.controller.policy_step()
+            command = self.controller.policy.obs_history[-1, 66:70].clone()
+        with patch.object(ROBOT.time, 'monotonic', return_value=20.2):
+            self.portal._vision_handler(detection(100., []))
+            self.assertIsNone(self.controller.get_ball_observation(.5))
+            self.controller.policy_step()
+        # Even far past image/pose timeout, the actor gets its retained XY.
+        with patch.object(ROBOT.time, 'monotonic', return_value=200.):
+            self.assertIsNone(self.controller.get_ball_observation(.5))
+            targets = self.controller.policy_step()
+            self.assertTrue(torch.isfinite(targets).all())
+            torch.testing.assert_close(self.controller.policy.obs_history[-1, 66:70], command)
+            self.assertEqual(self.controller.policy.frame_count, 3)
+
     def test_head_continues_while_pass_holds_body_and_across_handoff(self):
         with patch.object(ROBOT.time, 'monotonic', return_value=20.):
             self.controller.start()
