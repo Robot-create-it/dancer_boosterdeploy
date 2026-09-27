@@ -1,4 +1,4 @@
-"""MuJoCo integration checks for the K1 pass scene and policy."""
+"""MuJoCo integration checks for the K1 shoot scene and policy."""
 
 import math
 import unittest
@@ -6,13 +6,13 @@ import unittest
 import mujoco
 import numpy as np
 
-from booster_deploy.controllers.k1_pass_mujoco_controller import K1PassMujocoController
-from tasks.locomotion.robots.k1.passing import K1PassTaskCfg
+from booster_deploy.controllers.k1_shoot_mujoco_controller import K1ShootMujocoController
+from tasks.locomotion.robots.k1.shooting import K1ShootTaskCfg
 
 
-class PassSimTests(unittest.TestCase):
+class ShootSimTests(unittest.TestCase):
     def setUp(self):
-        self.controller = K1PassMujocoController(K1PassTaskCfg())
+        self.controller = K1ShootMujocoController(K1ShootTaskCfg())
 
     def test_scene_policy_and_head_control(self):
         c = self.controller
@@ -28,7 +28,7 @@ class PassSimTests(unittest.TestCase):
             self.assertTrue(np.isfinite(targets.numpy()).all())
             c.ctrl_step(targets)
         self.assertEqual(tuple(c.policy.obs_history.shape), (10, 71))
-        self.assertGreater(c.mj_data.qpos[8], 0.0)  # head pitches down to the ball
+        self.assertGreater(c.mj_data.qpos[8], 0.0)
         self.assertTrue(np.isfinite(c.mj_data.qpos).all())
 
     def test_ball_coordinates_follow_robot_yaw(self):
@@ -38,7 +38,7 @@ class PassSimTests(unittest.TestCase):
         np.testing.assert_allclose(
             c._ball_in_robot_frame(c.mj_data.xpos[c._trunk_body_id])[:2],
             (0.0, -0.8), atol=1e-6)
-        self.assertIsNone(c.get_ball_position(0.5))  # rotated out of camera view
+        self.assertIsNone(c.get_ball_position(0.5))
 
     def test_ball_outside_fov_holds_policy_and_starts_head_scan(self):
         c = self.controller

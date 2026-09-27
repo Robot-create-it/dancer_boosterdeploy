@@ -18,7 +18,7 @@ from booster_deploy.utils.vision_config import load_vision_config, camera_topics
 
 
 class InputProbe:
-    def __init__(self, config, color, depth):
+    def __init__(self, config, color, depth, task="k1_pass"):
         import rclpy
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import Image
@@ -26,7 +26,7 @@ class InputProbe:
         from vision_interface.msg import Detections
         from booster_deploy.utils.vision_ball import select_ball_observation
         self.rclpy = rclpy
-        self.node = rclpy.create_node("deploy_pass_input_check")
+        self.node = rclpy.create_node(f"deploy_{task.removeprefix('k1_')}_input_check")
         self.seen = {}
         self.count = {}
         self.ball = None
@@ -66,7 +66,7 @@ class InputProbe:
         while time.monotonic() < deadline:
             for process in processes:
                 if process.poll() is not None:
-                    raise RuntimeError("A camera/vision process exited; inspect logs/pass_*.log")
+                    raise RuntimeError("A camera/vision process exited; inspect the task's camera/vision logs")
             self.rclpy.spin_once(self.node, timeout_sec=0.1)
             now = time.monotonic()
             if all(self.count.get(name, 0) >= 3 and now - self.seen.get(name, 0) < 0.5
@@ -78,7 +78,7 @@ class InputProbe:
         raise RuntimeError(f"Missing/stale inputs: {missing}. Check platform camera/head_pose, ROS_DOMAIN_ID and image timestamps.")
 
 
-def main():
+def main(task="k1_pass"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vision-config", default="/opt/booster")
     parser.add_argument("--camera-driver", choices=("platform", "realsense"), default="platform")
@@ -87,10 +87,13 @@ def main():
     parser.add_argument("--timeout", type=float, default=30.)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--exit-mode", choices=("walking", "damping"), default="walking")
+    if task == "k1_shoot":
+        parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
+                            default="2", help="Choose the fixed shoot model by filename suffix")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-only", action="store_true", help="Read-only check; starts no camera, vision or motion processes")
     mode.add_argument("--vision-only", action="store_true", help="Start/reuse vision and print ball positions; no motion")
-    mode.add_argument("--head-only", action="store_true", help="Run zero-command loco plus head; never activate pass")
+    mode.add_argument("--head-only", action="store_true", help="Run zero-command loco plus head; never activate the kick policy")
     args = parser.parse_args()
     if not (args.check_only or args.vision_only):
         from booster_deploy.utils.robot_runtime import require_robot_interface
@@ -110,11 +113,11 @@ def main():
 
     import rclpy
     rclpy.init()
-    probe = InputProbe(config, color, depth)
+    probe = InputProbe(config, color, depth, task)
     processes, files = [], []
     def launch(command, name):
         (ROOT / "logs").mkdir(exist_ok=True)
-        log = (ROOT / "logs" / f"pass_{name}.log").open("w")
+        log = (ROOT / "logs" / f"{task.removeprefix('k1_')}_{name}.log").open("w")
         files.append(log)
         process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
@@ -159,9 +162,11 @@ def main():
                     next_print = time.monotonic() + 1.
                 if any(p.poll() is not None for p in processes):
                     raise RuntimeError("Vision/camera exited; inspect logs")
-        command = [sys.executable, "scripts/deploy.py", "--task", "k1_pass",
+        command = [sys.executable, "scripts/deploy.py", "--task", task,
                    "--vision-config", str(Path(args.vision_config).resolve()),
                    "--color-topic", color, "--device", args.device, "--exit-mode", args.exit_mode]
+        if task == "k1_shoot":
+            command.extend(("--shoot-policy", args.shoot_policy))
         if args.head_only:
             command.append("--head-only")
         # Keep deploy interactive, including its existing X/A controls.

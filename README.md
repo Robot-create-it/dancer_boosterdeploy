@@ -33,9 +33,14 @@ python scripts/deploy.py --task k1_pass --mujoco --ball-pos 0.5 0.2
 
 仿真场景使用 `assets/soccer` 中的球场与足球（来自 `dancer-rcssservermj` 的
 `resources/environments/soccer`）。默认球心位于世界坐标 `(0.8, 0, 0.11)` 米，
-`--ball-pos` 修改水平初始位置。策略从 MuJoCo 的机器人和足球位姿直接计算机器人坐标系下的球位置；
-仿真头部按球的真实位置跟踪，球可与机器人碰撞。此入口无需相机、ROS 或视觉节点。
+`--ball-pos` 修改水平初始位置。策略从 MuJoCo 的机器人和足球位姿计算机器人坐标系下的球位置，
+但仅在球心投影落入当前头部相机视野时使用；出视野后身体按现有无球逻辑保持，头部按实机的丢球保持与扫描逻辑找球。
+默认仿真相机内参取自 `vision_ws/src/vision/config/vision.yaml`，图像尺寸暂设为 512×480，
+可通过任务配置中的 `mujoco.pass_camera` 修改。此过滤不模拟遮挡或识别误差。
+球可与机器人碰撞。此入口无需相机、ROS 或视觉节点。
 窗口中按空格暂停/继续。
+无窗口对照测试（持续可见、开局不可见、运行 1 秒后丢球）：
+`python scripts/check_k1_pass_visibility.py --output logs/k1_pass_visibility.json`。
 
 在机器人上加载 Booster ROS 2 接口，编译并加载本仓库 `vision_ws` 后，运行
 `python scripts/start_k1_pass.py --vision-config /opt/booster`。
@@ -48,6 +53,22 @@ python scripts/deploy.py --task k1_pass --mujoco --ball-pos 0.5 0.2
 查看器只读订阅现有视觉；支持 NV12、识别框及原图切换，详细步骤见上述指南。
 
 任务从有效的 `Ball` 检测结果中选取置信度最高的球，读取其机器人坐标系下的 `position_projection`，将机器人指向球的方向设为传球方向，并以固定力度 2 运行 `k1_passing_policy_2.onnx`。无有效球或视觉/头部位姿超时时，身体沿用当前关节姿态保持，图像正常时头部仍可找球。Kp/Kd 和传球模型来自 RoboCup 示例工程；策略推理和 `joint_ctrl` 控制循环沿用本工程的 K1 行走部署流程。
+
+### K1 视觉射门
+
+shoot 使用与上述 pass 相同的相机、足球场景、50 Hz 控制循环、无球保持和头部跟踪。通过 `--shoot-policy` 固定选择 RoboCup 示例工程的五个 shoot 模型之一：`2`、`264`、`192`、`0109_0`、`0109_2`；缺省为 `2`。参数与模型文件后缀相同，例如 `264` 对应 `k1_shoot_policy_264.onnx`。策略把机器人指向球的方向作为测试方向，并应用所选模型在比赛配置中的球位置及方向偏移。比赛端以 power 6 选择 shoot 动作族；shoot 模型实际接收的速度观测固定为 1.0。pass 继续固定使用 power 2。
+
+```bash
+# 本地 sim2sim；也可加 --ball-pos 0.5 0.2
+python scripts/deploy.py --task k1_shoot --mujoco --shoot-policy 264
+
+# 实机 sim2real：先用 --vision-only 和 --head-only 检查，再启动策略
+python scripts/start_k1_shoot.py --vision-only --vision-config /opt/booster
+python scripts/start_k1_shoot.py --head-only --vision-config /opt/booster
+python scripts/start_k1_shoot.py --vision-config /opt/booster --shoot-policy 264
+```
+
+实机按与 pass 相同的 X/A 控制流程启动零速度行走准备与 shoot。实机运行需要机器人 ROS 2 和本仓库的 `vision_ws`。上述自动化测试可用 `python -m unittest tests.test_k1_shoot tests.test_k1_shoot_sim` 运行。
 
 ### Python 环境
 

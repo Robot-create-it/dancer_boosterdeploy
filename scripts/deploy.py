@@ -13,13 +13,15 @@ group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
 parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
 parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
-                    help="k1_pass --mujoco: initial ball centre in world XY (metres)")
+                    help="k1_pass/k1_shoot --mujoco: initial ball centre in world XY (metres)")
+parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
+                    help="k1_shoot: choose the fixed shoot model by filename suffix (default: 2)")
 parser.add_argument(
     "--vision-config", default="/opt/booster",
     help="Directory containing the robot's vision.yaml and optional vision_local.yaml",
 )
 parser.add_argument("--head-only", action="store_true",
-                    help="k1_pass: remain in zero-command loco preparation and test head tracking; A/r does not enable pass")
+                    help="K1 visual kick: remain in zero-command loco preparation and test head tracking")
 parser.add_argument("--color-topic", default=None, help="Override pass camera image topic")
 parser.add_argument("--no-head-tracking", action="store_true",
                     help="Disable automatic head targets for diagnosis")
@@ -36,6 +38,8 @@ args = parser.parse_args()
 
 
 def main():
+    if args.shoot_policy is not None and args.task != "k1_shoot":
+        parser.error("--shoot-policy requires --task k1_shoot")
     if not (args.list_tasks or args.mujoco):
         from booster_deploy.utils.robot_runtime import require_robot_interface
         try:
@@ -69,21 +73,27 @@ def main():
         print(f"Unknown task '{args.task}'. Available tasks: {list(list_tasks().keys())}")
         sys.exit(1)
 
+    if args.task == "k1_shoot":
+        from tasks.locomotion.robots.k1.shooting import select_shoot_policy
+        selected = args.shoot_policy or "2"
+        select_shoot_policy(task_cfg, selected)
+        print(f"K1 shoot policy: {selected} (power 6)", flush=True)
+
     # Set device for policy
     task_cfg.policy.device = args.device
     if args.exit_mode is not None:
         task_cfg.booster.exit_mode = args.exit_mode
-    if args.head_only and (args.task != "k1_pass" or args.mujoco):
-        parser.error("--head-only requires real-robot --task k1_pass")
+    if args.head_only and (args.task not in ("k1_pass", "k1_shoot") or args.mujoco):
+        parser.error("--head-only requires real-robot --task k1_pass or k1_shoot")
     if args.ball_pos is not None:
         import math
-        if args.task != "k1_pass" or not args.mujoco or not all(map(math.isfinite, args.ball_pos)):
-            parser.error("--ball-pos requires k1_pass --mujoco and two finite coordinates")
+        if args.task not in ("k1_pass", "k1_shoot") or not args.mujoco or not all(map(math.isfinite, args.ball_pos)):
+            parser.error("--ball-pos requires k1_pass/k1_shoot --mujoco and two finite coordinates")
         task_cfg.mujoco.ball_init_xy = args.ball_pos
     task_cfg.booster.head_only = args.head_only
     if args.no_head_tracking:
         task_cfg.booster.head_tracking.enabled = False
-    if args.task == "k1_pass" and not args.mujoco:
+    if args.task in ("k1_pass", "k1_shoot") and not args.mujoco:
         from booster_deploy.utils.vision_config import load_vision_config, camera_topics
         config = load_vision_config(args.vision_config)
         head = task_cfg.booster.head_tracking
@@ -93,7 +103,7 @@ def main():
         if args.color_topic:
             head.color_topic = args.color_topic
         if args.head_only:
-            print("HEAD TEST: X starts zero-command loco and head tracking. A/r will NOT start pass.")
+            print("HEAD TEST: X starts zero-command loco and head tracking. A/r will NOT start the kick policy.")
 
     # decide how to run based on flags
     if args.mujoco:
@@ -101,6 +111,9 @@ def main():
         if args.task == "k1_pass":
             from booster_deploy.controllers.k1_pass_mujoco_controller import K1PassMujocoController
             K1PassMujocoController(task_cfg).run()
+        elif args.task == "k1_shoot":
+            from booster_deploy.controllers.k1_shoot_mujoco_controller import K1ShootMujocoController
+            K1ShootMujocoController(task_cfg).run()
         else:
             from booster_deploy.controllers.mujoco_controller import MujocoController
             MujocoController(task_cfg).run()

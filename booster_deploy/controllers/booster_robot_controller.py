@@ -94,7 +94,8 @@ class BoosterRobotPortal:
 
     def _init_synced_buffer(self):
         from tasks.locomotion.k1_pass import K1PassPolicyCfg
-        self._vision_pass_enabled = isinstance(self.cfg.policy, K1PassPolicyCfg)
+        from tasks.locomotion.k1_shoot import K1ShootPolicyCfg
+        self._vision_pass_enabled = isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg))
         self.head_tracker = None
         if self.cfg.booster.head_tracking.enabled:
             self.head_tracker = HeadBallTracker(self.cfg.booster.head_tracking)
@@ -178,7 +179,7 @@ class BoosterRobotPortal:
                     from vision_interface.msg import Detections
                 except ImportError as exc:
                     raise RuntimeError(
-                        "k1_pass requires vision_interface; source vision_ws/install/setup.bash"
+                        "K1 visual kick requires vision_interface; source vision_ws/install/setup.bash"
                     ) from exc
                 self._detections_type = Detections
             self.create_low_cmd_publisher("booster_deploy_low_cmd_pub")
@@ -601,12 +602,13 @@ class BoosterRobotPortal:
         elif "k1" in robot_name:
             from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
             from tasks.locomotion.k1_pass import K1PassPolicyCfg
+            from tasks.locomotion.k1_shoot import K1ShootPolicyCfg
             if isinstance(self.cfg.policy, K1NestedLocomotionPolicyCfg):
                 # Keep the selected loco models, pose and gains during zero-command
                 # preparation; do not silently load the old k1_walk.pt checkpoint.
                 walk_cfg = deepcopy(self.cfg)
                 walk_cfg.policy.forced_route = None
-            elif isinstance(self.cfg.policy, K1PassPolicyCfg):
+            elif isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg)):
                 from tasks.locomotion.robots.k1.loco import K1LocoTaskCfg
                 walk_cfg = K1LocoTaskCfg()
             else:
