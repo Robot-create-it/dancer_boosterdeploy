@@ -17,32 +17,20 @@ class MujocoController(BaseController):
         super().__init__(cfg)
         self._paused = False
 
-        mjcf_path = self._expand_assets_placeholder(self.robot.cfg.mjcf_path)
-        if os.name == "nt" and not mjcf_path.isascii():
-            # MuJoCo's native file loader can reject non-ASCII Windows paths.
-            # At initialization (before control threads), load relative to the
-            # model directory and restore cwd even if parsing fails.
-            model_path = os.path.abspath(mjcf_path)
-            previous_cwd = os.getcwd()
-            try:
-                os.chdir(os.path.dirname(model_path))
-                self.mj_model = mujoco.MjModel.from_xml_path(os.path.basename(model_path))
-            finally:
-                os.chdir(previous_cwd)
-        else:
-            self.mj_model = mujoco.MjModel.from_xml_path(mjcf_path)
+        self.mj_model = self._load_model()
         self.mj_model.opt.timestep = self.cfg.mujoco.physics_dt
         self.decimation = self.cfg.mujoco.decimation
         self.mj_data = mujoco.MjData(self.mj_model)
         mujoco.mj_resetData(self.mj_model, self.mj_data)
 
-        self.mj_data.qpos = np.concatenate(
+        robot_qpos = np.concatenate(
             [
                 np.array(self.cfg.mujoco.init_pos, dtype=np.float32),
                 np.array(self.cfg.mujoco.init_quat, dtype=np.float32),
                 self.robot.default_joint_pos.numpy(),
             ]
         )
+        self.mj_data.qpos[:robot_qpos.size] = robot_qpos
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
         # render a second "ghost" robot (kinematic only) without
@@ -61,6 +49,23 @@ class MujocoController(BaseController):
 
         # Reference qpos can be set explicitly by the policy.
         self._reference_qpos: np.ndarray | None = None
+
+    def _load_model(self):
+        mjcf_path = self._expand_assets_placeholder(self.robot.cfg.mjcf_path)
+        if os.name == "nt" and not mjcf_path.isascii():
+            # MuJoCo's native file loader can reject non-ASCII Windows paths.
+            # At initialization (before control threads), load relative to the
+            # model directory and restore cwd even if parsing fails.
+            model_path = os.path.abspath(mjcf_path)
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(os.path.dirname(model_path))
+                model = mujoco.MjModel.from_xml_path(os.path.basename(model_path))
+            finally:
+                os.chdir(previous_cwd)
+        else:
+            model = mujoco.MjModel.from_xml_path(mjcf_path)
+        return model
 
     def start(self):
         # Clear reference; policy.reset() may set a fresh one.
@@ -207,9 +212,9 @@ class MujocoController(BaseController):
                 )
 
     def update_state(self) -> None:
-        dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
-        dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
-        dof_torque = self.mj_data.qfrc_actuator[6:].astype(np.float32)
+        dof_pos = self.mj_data.qpos.astype(np.float32)[7:7 + self.robot.num_joints]
+        dof_vel = self.mj_data.qvel.astype(np.float32)[6:6 + self.robot.num_joints]
+        dof_torque = self.mj_data.qfrc_actuator[6:6 + self.robot.num_joints].astype(np.float32)
 
         base_pos_w = self.mj_data.qpos.astype(np.float32)[:3]
         base_quat = self.mj_data.qpos.astype(np.float32)[3:7]
@@ -248,9 +253,9 @@ class MujocoController(BaseController):
             base_quat = self.mj_data.qpos.astype(np.float32)[3:7]
             base_lin_vel_b = self.mj_data.qvel.astype(np.float32)[:3]
             base_ang_vel_b = self.mj_data.qvel.astype(np.float32)[3:6]
-            dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
-            dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
-            dof_torque = self.mj_data.qfrc_actuator[6:].astype(np.float32)
+            dof_pos = self.mj_data.qpos.astype(np.float32)[7:7 + self.robot.num_joints]
+            dof_vel = self.mj_data.qvel.astype(np.float32)[6:6 + self.robot.num_joints]
+            dof_torque = self.mj_data.qfrc_actuator[6:6 + self.robot.num_joints].astype(np.float32)
 
             self._states['root_pos_w'].append(base_pos_w)
             self._states['root_quat_w'].append(base_quat)
@@ -272,8 +277,8 @@ class MujocoController(BaseController):
         if self.vel_command is not None:
             self.update_vel_command()
 
-        dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
-        dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
+        dof_pos = self.mj_data.qpos.astype(np.float32)[7:7 + self.robot.num_joints]
+        dof_vel = self.mj_data.qvel.astype(np.float32)[6:6 + self.robot.num_joints]
         kp = self.robot.joint_stiffness.numpy()
         kd = self.robot.joint_damping.numpy()
         # ctrl_limit = [
@@ -290,8 +295,8 @@ class MujocoController(BaseController):
                 ctrl_limit,
             )
             mujoco.mj_step(self.mj_model, self.mj_data)
-            dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
-            dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
+            dof_pos = self.mj_data.qpos.astype(np.float32)[7:7 + self.robot.num_joints]
+            dof_vel = self.mj_data.qvel.astype(np.float32)[6:6 + self.robot.num_joints]
 
     def run(self):
         with mujoco.viewer.launch_passive(

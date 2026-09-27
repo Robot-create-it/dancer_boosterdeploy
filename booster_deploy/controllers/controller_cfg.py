@@ -17,6 +17,8 @@ class PrepareStateCfg:
 class MujocoControllerCfg:
     init_pos: List[float] = [0.0, 0.0, 0.6]
     init_quat: List[float] = [1.0, 0.0, 0.0, 0.0]
+    # Used by the K1 pass soccer scene; the ball centre is 0.11 m above the field.
+    ball_init_xy: List[float] = [0.8, 0.0]
     decimation: int = 10
     # physics_dt will automatically be set by ControllerCfg
     physics_dt: float = None  # type: ignore

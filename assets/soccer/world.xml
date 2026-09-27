@@ -1,0 +1,50 @@
+<mujoco>
+  <compiler angle="radian" assetdir="assets"/>
+
+  <option timestep="0.005" density="1.2" viscosity="0.00002"/>
+
+  <default>
+    <!-- geometry classes -->
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2" density="0"/>
+    </default>
+  </default>
+
+  <asset>
+    <!-- Material for the soccer field. -->
+    <texture name="field-grass" type="2d" file="field_grass.png"/>
+    <material name="pitch" reflectance="0.0" texture="field-grass" rgba="0.5 0.6 0.55 1"/>
+
+    <!-- Material for the field border. -->
+    <texture name="border-grass" type="2d" file="border_grass.png"/>
+    <material name="lr-border" reflectance="0.0" texture="border-grass" rgba="0.4 0.5 0.45 1"/>
+    <material name="tb-border" reflectance="0.0" texture="border-grass" rgba="0.4 0.5 0.45 1"/>
+
+    <!-- Material for the field line markings. -->
+    <material name="line" rgba="0.92 0.96 0.90 1"/>
+
+    <!-- Material for the goal posts and nets. -->
+    <material name="goal-post" rgba="0.8 0.8 0.8 1"/>
+    <material name="goal-net" rgba="1 1 1 0.2"/>
+
+    <!-- Material for the ball. -->
+    <texture name="ball" type="cube" fileup="up.png" filedown="down.png" filefront="front.png" fileback="back.png" fileleft="left.png" fileright="right.png"/>
+    <material name="ball" texture="ball"/>
+  </asset>
+
+  <worldbody>
+    <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1"/>
+    <geom name="pitch" material="pitch" pos="0 0 0" size="32 24 40" type="plane"/>
+
+    <geom name="left-border"   class="visual" material="lr-border" pos="-33 0 0" size="1 24 40" type="plane"/>
+    <geom name="right-border"  class="visual" material="lr-border" pos="33 0 0"  size="1 24 40" type="plane"/>
+    <geom name="top-border"    class="visual" material="tb-border" pos="0 25 0"  size="34 1 40" type="plane"/>
+    <geom name="bottom-border" class="visual" material="tb-border" pos="0 -25 0" size="34 1 40" type="plane"/>
+
+    <body name="ball" pos="0 0 0.11">
+      <freejoint name="ball-root"/>
+      <site name='B-vismarker' pos='0 0 0'/>
+      <geom name="ball" pos="0 0 0" size="0.11" mass="0.41" friction="0.4 0.01 0.01" rgba="1 1 1 1" condim="6" priority="1" solref="-5000 -20" type="sphere" material="ball"/>
+    </body>
+  </worldbody>
+</mujoco>

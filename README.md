@@ -24,6 +24,19 @@ Booster Deploy 是轻量级策略部署框架，支持在 Booster 实机上运�
 
 ### K1 视觉传球
 
+本地 sim2sim 使用与实机相同的 `k1_pass` 策略和 50 Hz 关节控制链路：
+
+```bash
+python scripts/deploy.py --task k1_pass --mujoco
+python scripts/deploy.py --task k1_pass --mujoco --ball-pos 0.5 0.2
+```
+
+仿真场景使用 `assets/soccer` 中的球场与足球（来自 `dancer-rcssservermj` 的
+`resources/environments/soccer`）。默认球心位于世界坐标 `(0.8, 0, 0.11)` 米，
+`--ball-pos` 修改水平初始位置。策略从 MuJoCo 的机器人和足球位姿直接计算机器人坐标系下的球位置；
+仿真头部按球的真实位置跟踪，球可与机器人碰撞。此入口无需相机、ROS 或视觉节点。
+窗口中按空格暂停/继续。
+
 在机器人上加载 Booster ROS 2 接口，编译并加载本仓库 `vision_ws` 后，运行
 `python scripts/start_k1_pass.py --vision-config /opt/booster`。
 入口负责启动或复用视觉、检查相机及 `/head_pose`，再进入 deploy。

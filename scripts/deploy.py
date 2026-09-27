@@ -12,6 +12,8 @@ group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
 
 parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
+parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
+                    help="k1_pass --mujoco: initial ball centre in world XY (metres)")
 parser.add_argument(
     "--vision-config", default="/opt/booster",
     help="Directory containing the robot's vision.yaml and optional vision_local.yaml",
@@ -73,6 +75,11 @@ def main():
         task_cfg.booster.exit_mode = args.exit_mode
     if args.head_only and (args.task != "k1_pass" or args.mujoco):
         parser.error("--head-only requires real-robot --task k1_pass")
+    if args.ball_pos is not None:
+        import math
+        if args.task != "k1_pass" or not args.mujoco or not all(map(math.isfinite, args.ball_pos)):
+            parser.error("--ball-pos requires k1_pass --mujoco and two finite coordinates")
+        task_cfg.mujoco.ball_init_xy = args.ball_pos
     task_cfg.booster.head_only = args.head_only
     if args.no_head_tracking:
         task_cfg.booster.head_tracking.enabled = False
@@ -91,9 +98,12 @@ def main():
     # decide how to run based on flags
     if args.mujoco:
         # run mujoco controller
-        from booster_deploy.controllers.mujoco_controller import MujocoController
-
-        MujocoController(task_cfg).run()
+        if args.task == "k1_pass":
+            from booster_deploy.controllers.k1_pass_mujoco_controller import K1PassMujocoController
+            K1PassMujocoController(task_cfg).run()
+        else:
+            from booster_deploy.controllers.mujoco_controller import MujocoController
+            MujocoController(task_cfg).run()
     else:
         from booster_deploy.controllers.booster_robot_controller import BoosterRobotPortal
         with BoosterRobotPortal(task_cfg) as portal:
