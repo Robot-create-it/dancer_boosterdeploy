@@ -567,6 +567,9 @@ class BoosterRobotPortal:
             self.motor_cmd[i].q = init_joint_pos[i]
             self.motor_cmd[i].kp = float(prepare_state.stiffness[i])
             self.motor_cmd[i].kd = float(prepare_state.damping[i])
+        if self.cfg.booster.control_head:
+            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
+                self.motor_cmd[self.robot.cfg.joint_names.index(name)].weight = 1.0
 
         self.low_cmd_publisher.publish(self.low_cmd)
         time.sleep(0.1)
@@ -574,6 +577,10 @@ class BoosterRobotPortal:
         if not self._change_robot_mode("custom"):
             self.logger.error("Failed to switch to Custom mode")
             return False
+
+        if self.cfg.robot.prepare_mode.strip().lower() == "hold":
+            self.logger.info("Custom mode started; holding measured pose until A/r")
+            return True
 
         trans = np.linspace(init_joint_pos, prepare_state.joint_pos, num=500)
         start_time = time.perf_counter()
@@ -735,10 +742,10 @@ class BoosterRobotPortal:
         print("Initialization complete.")
 
         prepare_mode = self.cfg.robot.prepare_mode.strip().lower()
-        if prepare_mode not in ("walking", "standing"):
+        if prepare_mode not in ("walking", "standing", "hold"):
             raise ValueError(
                 f"Unsupported prepare_mode {self.cfg.robot.prepare_mode!r}; "
-                "expected 'walking' or 'standing'"
+                "expected 'walking', 'standing', or 'hold'"
             )
 
         # Walking preparation starts the Python locomotion policy immediately
@@ -747,7 +754,7 @@ class BoosterRobotPortal:
         if not self.start_custom_mode_conditionally():
             print("Custom mode initialization cancelled.")
         elif not self.start_rl_gait_conditionally(
-            wait_for_trigger=prepare_mode == "standing"
+            wait_for_trigger=prepare_mode in ("standing", "hold")
         ):
             print("RL mode initialization cancelled.")
         else:
@@ -933,12 +940,13 @@ class BoosterRobotController(BaseController):
             kd_val = float(self.robot.joint_damping[i].item())
             self.portal.motor_cmd[i].kp = kp_val
             self.portal.motor_cmd[i].kd = kd_val
-        if tracker is not None:
+        if tracker is not None or self.cfg.booster.control_head:
             # The K1 firmware routes the head through its upper-body command
             # interceptor even when Custom supplies the body targets. Match the
             # SDK low_level_publisher example: an externally controlled head
             # joint must carry weight=1; the message default is 0.
-            for i in indices:
+            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
+                i = self.cfg.robot.joint_names.index(name)
                 self.portal.motor_cmd[i].weight = 1.0
         self.portal.low_cmd_publisher.publish(self.portal.low_cmd)
         if tracker is not None and now - self._last_head_diagnostic >= 1.0:

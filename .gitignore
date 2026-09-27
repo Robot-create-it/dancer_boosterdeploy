@@ -18,6 +18,9 @@ tasks/**/motions/*
 !tasks/locomotion/robots/k1/models/pass/k1_passing_policy_2.onnx
 !tasks/locomotion/robots/k1/models/shoot/
 !tasks/locomotion/robots/k1/models/shoot/*.onnx
+!tasks/locomotion/robots/k1/models/recovery/
+!tasks/locomotion/robots/k1/models/recovery/*.onnx
+!tasks/locomotion/robots/k1/models/recovery/*.json
 !tasks/locomotion/robots/t1/models/t1_walk.pt
 !tasks/locomotion/robots/t2/models/t2_walk.pt
 # T1 BeyondMimic release assets are versioned.

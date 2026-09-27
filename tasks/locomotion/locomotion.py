@@ -7,9 +7,9 @@ import torch
 
 from booster_deploy.controllers.base_controller import BaseController, Policy
 from booster_deploy.controllers.controller_cfg import PolicyCfg
-from booster_deploy.utils.isaaclab import math as lab_math
 from booster_deploy.utils.isaaclab.configclass import configclass
 from booster_deploy.utils.policy_runner import create_policy_runner
+from booster_deploy.utils.proprioception import read_proprioception
 
 
 class LocomotionPolicy(Policy):
@@ -111,14 +111,8 @@ class LocomotionPolicy(Policy):
         return dof_target
 
     def compute_observation(self) -> torch.Tensor:
-        dof_pos = self.robot.data.joint_pos
-        dof_vel = self.robot.data.joint_vel
-        base_quat = self.robot.data.root_quat_w
-        base_ang_vel = self.robot.data.root_ang_vel_b
-
-        gravity_w = torch.tensor(
-            [0.0, 0.0, -1.0], dtype=torch.float32, device=self.device)
-        projected_gravity = lab_math.quat_apply_inverse(base_quat, gravity_w)
+        dof_pos, dof_vel, base_ang_vel, projected_gravity = read_proprioception(
+            self.robot.data)
 
         if self.cfg.enable_safety_fallback:
             if projected_gravity[2] > -0.5:

@@ -76,6 +76,7 @@ class BoosterRobotControllerCfg:
     joint_damping: Optional[List[float]] = None
     head_tracking: HeadTrackingCfg = HeadTrackingCfg()
     head_only: bool = False  # keep the zero-command preparation policy running
+    control_head: bool = False  # task supplies head targets; send weight=1
 
     def apply_to_robot(self, robot: "RobotCfg") -> "RobotCfg":
         overrides = {}
@@ -93,7 +94,7 @@ class BoosterRobotControllerCfg:
 @configclass
 class RobotCfg:
     name: str = MISSING
-    # Preparation entered after pressing X. Supported values: "walking", "standing".
+    # Preparation after X: "walking", "standing", or "hold" (current pose).
     prepare_mode: str = "walking"
 
     joint_names: list[str] = MISSING

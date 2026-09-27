@@ -188,6 +188,7 @@ Python 配置中也接受 `"walk"`，它是 `"walking"` 的别名。
 
 - `"walking"`（默认）：从 `/low_state` 读取当前关节位置，使用机器人的 `prepare_state` `kp/kd` 发布一次位置保持指令，切换到 `Custom` 模式，然后启动与机器人对应的行走策略，并将速度指令全部置零。按遥控器 `A`（或键盘 `r`）结束准备阶段，启动 `--task` 指定的任务。对于 `k1_loco`，准备阶段已运行所选的三模型策略；按 `A`/`r` 后只开放速度指令，不重新加载模型，也不重置观测历史和动作滤波状态。
 - `"standing"`：发布当前关节位置保持指令，切换到 `Custom` 模式，再用约一秒插值过渡到配置的 `prepare_state.joint_pos`。按 `A`/`r` 启动所选任务策略。
+- `"hold"`：发布当前实测关节位置保持指令并进入 `Custom`，按 `A`/`r` 启动任务，不做站姿插值。`k1_recovery` 使用此准备方式。
 
 可在机器人配置中设置准备模式，例如：
 
@@ -237,6 +238,19 @@ robot = T2_31DOF_CFG.replace(prepare_mode="walking")
 
 当 `prepare_mode="walking"` 时，按 `X` 启动零速度指令的行走准备，按 `A`/`r` 启动所选任务策略。当 `prepare_mode="standing"` 时，按 `X` 先进行约一秒的 `prepare_state.joint_pos` 姿态过渡，再按 `A`/`r` 启动所选任务策略。按 `Ctrl+C` 停止部署程序。
 
+
+### K1 倒地恢复
+
+`k1_recovery` 使用 demo 的 FDR 模型和仰卧/俯卧轨迹，观测传感器来源与
+`k1_loco` 共用同一读取函数。实机入口：
+
+```bash
+python scripts/deploy.py --task k1_recovery
+```
+
+按 X/x 保持当前实测姿态，按 A/r 开始恢复。成功后保持末帧目标；默认最多重试两次，
+失败或退出时进入 damping。模型观测、仿真命令和验证范围见
+[recovery 迁移说明](docs/k1_recovery_migration.md)。
 
 ## 仓库结构
 

@@ -12,6 +12,8 @@ group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
 
 parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
+parser.add_argument("--recovery-posture", choices=("faceup", "facedown"),
+                    help="k1_recovery --mujoco: initial lying posture (default: facedown)")
 parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
                     help="k1_pass/k1_shoot --mujoco: initial ball centre in world XY (metres)")
 parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
@@ -38,6 +40,8 @@ args = parser.parse_args()
 
 
 def main():
+    if args.recovery_posture is not None and (args.task != "k1_recovery" or not args.mujoco):
+        parser.error("--recovery-posture requires --task k1_recovery --mujoco")
     if args.shoot_policy is not None and args.task != "k1_shoot":
         parser.error("--shoot-policy requires --task k1_shoot")
     if not (args.list_tasks or args.mujoco):
@@ -80,6 +84,8 @@ def main():
         print(f"K1 shoot policy: {selected} (power 6)", flush=True)
 
     # Set device for policy
+    if args.task == "k1_recovery" and args.mujoco and args.recovery_posture == "faceup":
+        task_cfg.mujoco.init_quat[2] *= -1
     task_cfg.policy.device = args.device
     if args.exit_mode is not None:
         task_cfg.booster.exit_mode = args.exit_mode

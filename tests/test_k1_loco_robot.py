@@ -18,6 +18,7 @@ import torch
 from booster_deploy.controllers.base_controller import BaseController
 from tasks.locomotion.robots.k1 import K1WalkTaskCfg
 from tasks.locomotion.robots.k1.loco import K1LocoTaskCfg
+from tasks.locomotion.robots.k1.recovery import K1RecoveryTaskCfg
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,6 +283,63 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(factory.call_count, 2)
         first.run.assert_called_once_with(stop_event=portal.task_start_event)
         second.run.assert_called_once_with()
+
+
+class RecoveryRobotTests(unittest.TestCase):
+    def test_recovery_uses_loco_low_state_path_and_serial_commands(self):
+        cfg = K1RecoveryTaskCfg()
+        portal = make_portal(cfg)
+        controller = ROBOT.BoosterRobotController(portal.cfg, portal)
+        q = np.array(cfg.robot.default_joint_pos) + np.linspace(-0.02, 0.02, 22)
+        dq = np.linspace(-7., 7., 22)
+        gyro = [0.03, -0.04, 0.05]
+        message = SimpleNamespace(
+            imu_state=SimpleNamespace(rpy=[0.1, -1.4, 0.2], gyro=gyro),
+            motor_state_serial=[SimpleNamespace(q=a, dq=b, tau_est=0.) for a, b in zip(q, dq)],
+        )
+        portal._low_state_handler(message)
+        controller.update_state()
+        controller.start()
+        controller.policy.settle_time = 1.
+        target = controller.policy_step()
+        controller.ctrl_step(target)
+        obs = controller.policy.last_observation
+        np.testing.assert_allclose(obs[31:34], gyro, atol=1e-7)  # no degrees conversion
+        np.testing.assert_allclose(obs[36:56], (q - cfg.policy.reference)[2:], atol=1e-7)
+        np.testing.assert_allclose(obs[58:78], np.clip(dq[2:], -5, 5) * .1, atol=1e-7)
+        np.testing.assert_allclose([m.q for m in portal.motor_cmd], target)
+        np.testing.assert_allclose([m.kp for m in portal.motor_cmd], cfg.robot.joint_stiffness)
+        np.testing.assert_allclose([m.kd for m in portal.motor_cmd], cfg.robot.joint_damping)
+        self.assertEqual([m.weight for m in portal.motor_cmd[:2]], [1., 1.])
+        self.assertTrue(all(m.dq == 0 and m.tau == 0 for m in portal.motor_cmd))
+        self.assertFalse(portal.head_tracker)
+        self.assertEqual(portal.cfg.booster.exit_mode, 'damping')
+
+    def test_hold_preparation_accepts_fallen_pose_without_interpolation(self):
+        portal = make_portal(K1RecoveryTaskCfg())
+        state = portal.synced_state.read()
+        state[0]['root_rpy_w'] = [0., -1.5, 0.]
+        state[0]['joint_pos'] += .01
+        portal.synced_state.write(state)
+        portal.low_state_received_event.set()
+        portal.remoteControlService.start_custom_mode.return_value = True
+        portal.low_cmd_publisher.get_subscription_count.return_value = 1
+        with patch.object(portal, '_change_robot_mode', return_value=True) as mode, \
+                patch.object(ROBOT.time, 'sleep'), patch.object(ROBOT.np, 'linspace') as interpolate:
+            self.assertTrue(portal.start_custom_mode_conditionally())
+        mode.assert_called_once_with('custom')
+        interpolate.assert_not_called()
+        portal.low_cmd_publisher.publish.assert_called_once()
+        np.testing.assert_allclose([m.q for m in portal.motor_cmd], state[0]['joint_pos'])
+        self.assertEqual([m.weight for m in portal.motor_cmd[:2]], [1., 1.])
+
+    def test_hold_mode_waits_for_task_trigger(self):
+        portal = make_portal(K1RecoveryTaskCfg())
+        with patch.object(portal, 'start_custom_mode_conditionally', return_value=True), \
+                patch.object(portal, 'start_rl_gait_conditionally', return_value=False) as start, \
+                patch.object(portal, '_change_robot_mode', return_value=True):
+            portal.run()
+        start.assert_called_once_with(wait_for_trigger=True)
 
 
 if __name__ == '__main__':
