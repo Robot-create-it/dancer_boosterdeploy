@@ -35,6 +35,7 @@ from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
 from ..utils.remote_control_service import RemoteControlService
+from ..utils.vision_ball import select_ball
 
 
 logger = logging.getLogger("booster_deploy")
@@ -91,6 +92,14 @@ class BoosterRobotPortal:
         self._init_communication()
 
     def _init_synced_buffer(self):
+        from tasks.locomotion.k1_pass import K1PassPolicyCfg
+        self._vision_pass_enabled = isinstance(self.cfg.policy, K1PassPolicyCfg)
+        self.synced_ball = SyncedArray(
+            "ball", shape=(1,),
+            dtype=np.dtype([("x", float), ("y", float), ("stamp", float)]),
+        ) if self._vision_pass_enabled else None
+        if self.synced_ball is not None:
+            self.synced_ball.write(np.zeros((1,), dtype=self.synced_ball.dtype))
         action_dtype = np.dtype(
             [
                 ("dof_target", float, (self.robot.num_joints,)),
@@ -150,6 +159,14 @@ class BoosterRobotPortal:
 
     def _init_communication(self) -> None:
         try:
+            if self._vision_pass_enabled:
+                try:
+                    from vision_interface.msg import Detections
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "k1_pass requires the demo vision_interface ROS 2 package"
+                    ) from exc
+                self._detections_type = Detections
             self.create_low_cmd_publisher("booster_deploy_low_cmd_pub")
             self._start_low_state_subscription()
         except Exception as e:
@@ -176,6 +193,17 @@ class BoosterRobotPortal:
                     history=HistoryPolicy.KEEP_LAST,
                 ),
             )
+            if self._vision_pass_enabled:
+                low_state_node.create_subscription(
+                    self._detections_type,
+                    "/booster_vision/detection",
+                    self._vision_handler,
+                    QoSProfile(
+                        depth=1,
+                        reliability=ReliabilityPolicy.BEST_EFFORT,
+                        history=HistoryPolicy.KEEP_LAST,
+                    ),
+                )
 
             executor = SingleThreadedExecutor()
             executor.add_node(low_state_node)
@@ -210,6 +238,15 @@ class BoosterRobotPortal:
             daemon=True,
         )
         self.low_state_thread.start()
+
+    def _vision_handler(self, detections):
+        ball = select_ball(detections)
+        if ball is None:
+            return
+        sample = np.zeros((1,), dtype=self.synced_ball.dtype)
+        sample[0]["x"], sample[0]["y"] = ball
+        sample[0]["stamp"] = time.monotonic()
+        self.synced_ball.write(sample)
 
     def _low_state_handler(self, low_state_msg: LowState):
         self.metrics["low_state_handler"].mark()
@@ -511,11 +548,15 @@ class BoosterRobotPortal:
             walk_cfg = T1WalkControllerCfg1()
         elif "k1" in robot_name:
             from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
+            from tasks.locomotion.k1_pass import K1PassPolicyCfg
             if isinstance(self.cfg.policy, K1NestedLocomotionPolicyCfg):
                 # Keep the selected loco models, pose and gains during zero-command
                 # preparation; do not silently load the old k1_walk.pt checkpoint.
                 walk_cfg = deepcopy(self.cfg)
                 walk_cfg.policy.forced_route = None
+            elif isinstance(self.cfg.policy, K1PassPolicyCfg):
+                from tasks.locomotion.robots.k1.loco import K1LocoTaskCfg
+                walk_cfg = K1LocoTaskCfg()
             else:
                 from tasks.locomotion.robots.k1 import K1WalkTaskCfg
                 walk_cfg = K1WalkTaskCfg()
@@ -734,6 +775,16 @@ class BoosterRobotController(BaseController):
             cfg.robot.prepare_mode.strip().lower() == "walking"
             and cfg.vel_command is not None
         )
+
+    def get_ball_position(self, max_age: float):
+        if self.portal.synced_ball is None:
+            return None
+        sample = self.portal.synced_ball.read()[0]
+        stamp = float(sample["stamp"])
+        age = time.monotonic() - stamp
+        if stamp <= 0 or age < 0 or age > max_age:
+            return None
+        return float(sample["x"]), float(sample["y"])
 
     def update_vel_command(self):
         if not self._velocity_commands_enabled:

@@ -223,6 +223,10 @@ class BaseController:
 
         return self.policy.inference()
 
+    def get_ball_position(self, max_age: float):
+        """Vision position in the robot frame; unavailable by default."""
+        return None
+
     def stop(self) -> None:
         """Stop and clean up the deployment session."""
         self.is_running = False

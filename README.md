@@ -1,4 +1,4 @@
-# Booster Deploy
+# Booster Deploy（Booster 部署框架）
 
 K1 三模型行走任务：`python scripts/deploy.py --task k1_loco --mujoco`。
 模型来源、迁移实现、Windows 启动方式与验证结果见 [K1 loco 迁移说明](docs/k1_loco_migration.md)。
@@ -7,24 +7,30 @@ K1 实机三模型部署：在机器人 ROS 2 环境执行 `python scripts/deplo
 
 中文源码导读：[代码解读与运控数据流](docs/代码解读与运控数据流.md)，包含阅读路线、实机与仿真控制链路、策略观测与关节映射、启动切换流程及调试定位。
 
-Booster Deploy is a lightweight deployment framework that supports running control policies on Booster robots (sim2real) and MuJoCo (sim2sim). The system adopts many well-established designs from IsaacLab to provide modular abstractions, allowing unified policy execution across simulated and real platforms.
+Booster Deploy 是轻量级策略部署框架，支持在 Booster 实机上运行控制策略（仿真到实机），也支持在 MuJoCo 中运行策略（仿真到仿真）。框架借鉴 IsaacLab 的模块化设计，使同一套策略执行流程适用于仿真和实机。
 
 
-## Prerequisites
+## 环境要求
 
-| Environment | Notes |
+| 环境 | 说明 |
 |-------------|-------|
-| Booster firmware >= v1.7.2 | Required for real robot deployments. |
-| Python 3.10+ | Already installed on the robot |
-| ROS 2 with `booster_interface` | Required for the DDS-backed `/low_state`, `/joint_ctrl`, and RPC interfaces. Already installed on the robot. |
-| MuJoCo | Optional; install if you plan to run simulation locally. |
+| Booster 固件 ≥ v1.7.2 | 实机部署需要。 |
+| Python 3.10 及以上 | 机器人上已安装。 |
+| ROS 2 与 `booster_interface` | `/low_state`、`/joint_ctrl` 和 RPC 接口通过 DDS 通信，机器人上已安装所需组件。 |
+| MuJoCo | 本地运行仿真时安装。 |
 
 
-## Running Deployments
+## 运行部署任务
 
-### Python environment
+### K1 视觉传球
 
-Create and activate a local virtual environment, then install the dependencies:
+在机器人上加载 Booster ROS 2 接口和 RoboCup 示例工程的 `vision_interface` 工作空间后，运行 `python scripts/deploy.py --task k1_pass`。启动示例工程的视觉节点，使其在 `/booster_vision/detection` 发布 `Detections` 消息。
+
+任务从有效的 `Ball` 检测结果中选取置信度最高的球，读取其机器人坐标系下的 `position_projection`，将机器人指向球的方向设为传球方向，并以固定力度 2 运行 `k1_passing_policy_2.onnx`。未检测到球，或球的观测超过 0.5 秒未更新时，机器人保持当前关节位置，直到视觉恢复。Kp/Kd 和传球模型来自 RoboCup 示例工程；策略推理和 `joint_ctrl` 控制循环沿用本工程的 K1 行走部署流程。
+
+### Python 环境
+
+创建并激活本地虚拟环境，然后安装依赖：
 
 ```bash
 python3 -m venv .venv
@@ -32,235 +38,215 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Debian/Ubuntu, install `python3-venv` if needed. On the robot, activate
-`.venv` before loading ROS 2; `booster_interface` is provided by the robot:
+在 Debian/Ubuntu 上，如有需要，先安装 `python3-venv`。在机器人上，应先激活 `.venv`，再加载 ROS 2 环境；`booster_interface` 由机器人提供：
 
 ```bash
 source .venv/bin/activate
 source /opt/booster/BoosterRos2Interface/install/setup.bash
 ```
 
-### Add and list tasks:
-   1. Create a subfolder under `tasks/` for your task.
-   2. Implement a `Policy`/`PolicyCfg` and provide a `ControllerCfg` referencing the policy.
-   3. Place policy checkpoints under `models/` and reference the path in the config.
-   4. Register your `ControllerCfg` config in the task registry (see existing tasks for the registration pattern).
-   5. Check all available tasks:
-      ```bash
-      python scripts/deploy.py --list
-      ```
+### 添加和查看任务
 
-### Policy inference backends
+1. 在 `tasks/` 下为任务创建子目录。
+2. 实现 `Policy`/`PolicyCfg`，并在 `ControllerCfg` 中指定该策略。
+3. 将策略模型文件放在 `models/` 下，并在配置中填写路径。
+4. 将 `ControllerCfg` 注册到任务注册表；注册方式可参考现有任务。
+5. 查看全部可用任务：
 
-The checkpoint suffix selects the inference backend automatically:
+   ```bash
+   python scripts/deploy.py --list
+   ```
 
-- `.pt`, `.jit`, `.torchscript`: TorchScript
-- `.onnx`: ONNX Runtime with the CPU execution provider
-make sure `onnxruntime` is installed in the deployment environment.
+### 策略推理后端
 
-### Run Sim2Sim (MuJoCo)
+框架根据模型文件后缀自动选择推理后端：
 
-- Download and install BoosterAssets:
-   - Clone the [booster_assets](https://github.com/BoosterRobotics/booster_assets) which contains Booster robot models and resources.
-   - Install booster_assets python helper following the instructions in the repository.
+- `.pt`、`.jit`、`.torchscript`：TorchScript
+- `.onnx`：ONNX Runtime，使用 CPU 执行提供程序
 
-- Install Python dependencies in the activated virtual environment:
+部署环境中需要安装 `onnxruntime`。
+
+### 运行仿真到仿真（MuJoCo）
+
+- 下载并安装 BoosterAssets：
+   - 克隆包含 Booster 机器人模型和资源的 [booster_assets](https://github.com/BoosterRobotics/booster_assets) 仓库。
+   - 按仓库说明安装 `booster_assets` Python 辅助包。
+
+- 在已激活的虚拟环境中安装 Python 依赖：
    ```
    python -m pip install -r requirements.txt
    ```
 
-- Launch the task in mujoco:
+- 在 MuJoCo 中启动任务：
    ```bash
    python scripts/deploy.py --task <TASK_NAME> --mujoco
    ```
 
-### Run Sim2Real (Real Robots)
+### 运行仿真到实机（实体机器人）
 
-**IMPORTANT**: Make sure to install [Booster Firmware](https://booster.feishu.cn/wiki/E3q5wF5SnitXZgkY18Uc8odBnXb) >= v1.4 on the robot before proceeding.
+**注意**：继续操作前，确认机器人已安装 v1.4 或更高版本的 [Booster 固件](https://booster.feishu.cn/wiki/E3q5wF5SnitXZgkY18Uc8odBnXb)。
 
-- After you finish testing your task with Sim2Sim locally, copy the project to the robot.
+- 在本地完成仿真到仿真测试后，将项目复制到机器人。
 
-- Install Python dependencies in the activated virtual environment on the robot:
+- 在机器人已激活的虚拟环境中安装 Python 依赖：
    ```
    python -m pip install -r requirements.txt
    ```
 
-- SSH into the robot and start the ROS 2 environment by sourcing the provided setup script:
+- 通过 SSH 登录机器人，并加载提供的初始化脚本以启用 ROS 2 环境：
    ```bash
    source /opt/booster/BoosterRos2Interface/install/setup.bash
    ```
 
-- Launch the task on the robot and follow the prompts shown in the command line..
+- 在机器人上启动任务，并按命令行提示操作：
    ```bash
    python scripts/deploy.py --task <TASK_NAME>
    ```
 
-#### PD damping (`Kd`) on the real robot
+#### 实机 PD 阻尼参数（`Kd`）
 
-Hardware-only gain overrides can be set with
-`booster.joint_stiffness` and `booster.joint_damping`, in `robot.joint_names`
-order. Unset overrides use the corresponding `robot` gains. MuJoCo always uses
-`robot.joint_stiffness` / `robot.joint_damping`.
-`k1_loco` uses the existing `k1_walk` gains as its hardware baseline, while
-retaining its original loco gains in simulation. This does not establish that
-those gains have been validated on hardware with the three loco policies.
+可通过 `booster.joint_stiffness` 和 `booster.joint_damping` 覆盖仅用于实机的增益，数值顺序须与 `robot.joint_names` 一致。未设置覆盖值时，使用 `robot` 中对应的增益。MuJoCo 始终使用 `robot.joint_stiffness` 和 `robot.joint_damping`。
 
-For parallel-actuated joints, `robot.joint_damping` is sent directly to the
-motors (after applying any `booster.joint_damping` override), so do not reuse
-the training-simulator `Kd`. Compute the motor-side value as:
+`k1_loco` 在实机上以现有 `k1_walk` 增益为基准，在仿真中保留原始 loco 增益。这不代表这些增益已经过三模型 loco 策略的实机验证。
+
+对于并联驱动关节，应用 `booster.joint_damping` 覆盖值后，`robot.joint_damping` 会直接发送给电机，因此不要直接沿用训练仿真器中的 `Kd`。电机侧数值可按下式计算：
 
 ```text
 Kd = 2 * zeta * J_eq * (2 * pi * f_n)
 ```
 
-where `J_eq` is the armature of the parallel-actuated joint, `f_n` is the
-natural frequency, and `zeta` is the damping ratio.
+其中，`J_eq` 为并联驱动关节的等效转动惯量，`f_n` 为固有频率，`zeta` 为阻尼比。
 
 
-#### Controller exit mode
+#### 控制器退出模式
 
-`booster.exit_mode` controls the robot mode entered after the custom
-controller exits. It applies to robots whose firmware supports the
-corresponding DDS RPC mode-switch API:
+`booster.exit_mode` 控制自定义控制器退出后机器人切换到的模式。此设置适用于固件支持相应 DDS RPC 模式切换接口的机器人：
 
-- `"damping"`: switch to damping mode
-- `"walking"`: switch to walking mode (default)
+- `"damping"`：切换到阻尼模式
+- `"walking"`：切换到行走模式（默认）
 
-The value can be set in the task controller configuration, for example:
+可在任务控制器配置中设置该值，例如：
 
 ```python
 booster = BoosterRobotControllerCfg(exit_mode="damping")
 ```
 
-You can override the task configuration at startup when damping is preferred:
+如需以阻尼模式退出，也可在启动时覆盖任务配置：
 
 ```bash
 python3 scripts/deploy.py --task <TASK_NAME> --exit-mode damping
 ```
 
-The value `"walk"` is also accepted as an alias for `"walking"` in Python configuration.
+Python 配置中也接受 `"walk"`，它是 `"walking"` 的别名。
 
 
-#### Robot preparation mode
+#### 机器人准备模式
 
-`robot.prepare_mode` controls what happens after pressing `X` to enter Custom
-mode. Set it independently in each robot configuration (T1, T2, or K1):
+`robot.prepare_mode` 控制按下 `X` 进入 `Custom` 模式后的准备流程。可分别在 T1、T2、K1 的机器人配置中设置：
 
-- `"walking"` (default): read the current joint positions from `/low_state`,
-  publish one position-hold command using the robot's `prepare_state` `kp/kd`,
-  switch to Custom, then start the matching robot locomotion policy with all
-  velocity commands masked to zero. Press `A` on the remote (or `r` on the
-  keyboard) to stop the preparation policy and start the task selected by
-  `--task`. For `k1_loco`, preparation already runs the selected three-model
-  policy: `A`/`r` enables velocity commands without reloading models or resetting
-  observation history and action filtering.
-- `"standing"`: publish the current-position hold command, switch to Custom,
-  and interpolate for approximately one second to the configured
-  `prepare_state.joint_pos`. Press `A`/`r` to start the selected task policy.
+- `"walking"`（默认）：从 `/low_state` 读取当前关节位置，使用机器人的 `prepare_state` `kp/kd` 发布一次位置保持指令，切换到 `Custom` 模式，然后启动与机器人对应的行走策略，并将速度指令全部置零。按遥控器 `A`（或键盘 `r`）结束准备阶段，启动 `--task` 指定的任务。对于 `k1_loco`，准备阶段已运行所选的三模型策略；按 `A`/`r` 后只开放速度指令，不重新加载模型，也不重置观测历史和动作滤波状态。
+- `"standing"`：发布当前关节位置保持指令，切换到 `Custom` 模式，再用约一秒插值过渡到配置的 `prepare_state.joint_pos`。按 `A`/`r` 启动所选任务策略。
 
-The mode can be set in a robot configuration, for example:
+可在机器人配置中设置准备模式，例如：
 
 ```python
 robot = T2_31DOF_CFG.replace(prepare_mode="walking")
 ```
 
-### Remote Controller
+### 遥控器与键盘
 
-The deployment supports both remote controllers and keyboard input:
+部署程序支持遥控器和键盘输入：
 
-- GameSir: detected automatically.
-- Booster remote: used through `/remote_controller_state`.
-- Keyboard: available.
+- GameSir 遥控器：自动检测。
+- Booster 遥控器：通过 `/remote_controller_state` 接入。
+- 键盘：可直接使用。
 
 <table>
   <tr>
     <th align="left">GameSir</th>
-    <th align="left">Booster remote</th>
+    <th align="left">Booster 遥控器</th>
   </tr>
   <tr>
-    <td valign="top"><img src="docs/images/gamesir.jpg" alt="GameSir remote" width="320"></td>
-    <td valign="top"><img src="docs/images/booster_remote.jpg" alt="Booster remote" width="320"></td>
+    <td valign="top"><img src="docs/images/gamesir.jpg" alt="GameSir 遥控器" width="320"></td>
+    <td valign="top"><img src="docs/images/booster_remote.jpg" alt="Booster 遥控器" width="320"></td>
   </tr>
 </table>
 
-On either remote controller, use the left stick for forward/lateral motion, the
-right stick for rotation, `X` to start Custom mode, and `A` to start RL mode.
+两种遥控器均使用左摇杆控制前进、后退和横移，右摇杆控制旋转；按 `X` 进入 `Custom` 模式，按 `A` 启动强化学习（RL）策略。
 
-| Control | Action |
+| 操作 | 功能 |
 |---------|--------|
-| Left stick forward/back | Increase/decrease forward velocity (`vx`) |
-| Left stick left/right | Increase/decrease lateral velocity (`vy`) |
-| Right stick left/right | Rotate left/right (`vyaw`) |
-| Joystick `X` | Start Custom mode |
-| Joystick `A` | Start RL mode |
+| 左摇杆前／后 | 增大／减小前向速度（`vx`） |
+| 左摇杆左／右 | 增大／减小横向速度（`vy`） |
+| 右摇杆左／右 | 向左／右旋转（`vyaw`） |
+| 遥控器 `X` | 进入 `Custom` 模式 |
+| 遥控器 `A` | 启动 RL 策略 |
 
-Keyboard:
+键盘操作：
 
-| Key | Action |
+| 按键 | 功能 |
 |-----|--------|
-| `w` / `s` | Increase/decrease `vx` by `0.1` |
-| `a` / `d` | Increase/decrease `vy` by `0.1` |
-| `q` / `e` | Increase/decrease `vyaw` by `0.1` |
-| `x` | Start Custom mode |
-| `r` | Start RL mode |
-| `Space` | Set all velocity commands to zero |
+| `w` / `s` | 将 `vx` 增大／减小 `0.1` |
+| `a` / `d` | 将 `vy` 增大／减小 `0.1` |
+| `q` / `e` | 将 `vyaw` 增大／减小 `0.1` |
+| `x` | 进入 `Custom` 模式 |
+| `r` | 启动 RL 策略 |
+| 空格键 | 将全部速度指令置零 |
 
-With `prepare_mode="walking"`, `X` starts zero-command locomotion preparation and
-`A`/`r` starts the selected task policy. With `prepare_mode="standing"`, `X`
-first performs the one-second transition to `prepare_state.joint_pos`, and
-`A`/`r` then starts the selected task policy. Stop the deployment with `Ctrl+C`.
+当 `prepare_mode="walking"` 时，按 `X` 启动零速度指令的行走准备，按 `A`/`r` 启动所选任务策略。当 `prepare_mode="standing"` 时，按 `X` 先进行约一秒的 `prepare_state.joint_pos` 姿态过渡，再按 `A`/`r` 启动所选任务策略。按 `Ctrl+C` 停止部署程序。
 
 
-## Repository Layout
+## 仓库结构
 
 ```
 booster_deploy/
-├─ booster_deploy/           # Controllers, policies, utilities
-│  └─ robots/                # Robot model configurations
-│     ├─ k1.py               # K1 configuration
-│     ├─ t1.py               # T1 23-DOF configuration
-│     ├─ t2.py               # T2 31-DOF configuration
-│     ├─ __init__.py         # Public configuration exports
-│     └─ booster.py          # Backward-compatible import path
-├─ scripts/                  # Entry-point scripts (deploy.py)
-├─ tasks/                    # Task registry and configs
-└─ requirements.txt          # Python dependencies
+├─ booster_deploy/           # 控制器、策略及工具模块
+│  └─ robots/                # 机器人模型配置
+│     ├─ k1.py               # K1 配置
+│     ├─ t1.py               # T1 23 自由度配置
+│     ├─ t2.py               # T2 31 自由度配置
+│     ├─ __init__.py         # 对外导出的配置
+│     └─ booster.py          # 兼容旧代码的导入路径
+├─ scripts/                  # 启动脚本（deploy.py）
+├─ tasks/                    # 任务注册表和配置
+└─ requirements.txt          # Python 依赖
 ```
 
-Key modules:
-- `booster_deploy/`: Core module providing a unified abstraction for MuJoCo and physical robots. Real-robot communication uses ROS 2 DDS (a `/low_state` subscriber, `/joint_ctrl` publisher, and RPC client).
-- `booster_deploy/robots/`: Robot configuration modules. Each robot has a dedicated module that defines a `RobotCfg` describing:
-    - `k1.py`: `K1_CFG`
-    - `t1.py`: `T1_23DOF_CFG`
-    - `t2.py`: `T2_31DOF_CFG`
-    - joint names and body names
-    - default joint positions
-    - default joint stiffness (`joint_stiffness`) and damping (`joint_damping`)
-    - effort limits
-    - `mjcf_path` for MuJoCo model loading
-    - `prepare_state` (prepare pose, stiffness and damping used when entering custom mode)
+主要模块：
 
-  Import configurations from the package or from the robot-specific module:
+- `booster_deploy/`：核心模块，为 MuJoCo 仿真和实体机器人提供统一接口。实机通信使用 ROS 2 DDS，包括 `/low_state` 订阅者、`/joint_ctrl` 发布者和 RPC 客户端。
+- `booster_deploy/robots/`：机器人配置模块。每种机器人都有独立的 `RobotCfg` 配置：
+    - `k1.py`：`K1_CFG`
+    - `t1.py`：`T1_23DOF_CFG`
+    - `t2.py`：`T2_31DOF_CFG`
+    - 关节名称与机身部件名称
+    - 默认关节位置
+    - 默认关节刚度（`joint_stiffness`）和阻尼（`joint_damping`）
+    - 力矩上限
+    - 用于加载 MuJoCo 模型的 `mjcf_path`
+    - `prepare_state`：进入 `Custom` 模式时使用的准备姿态、刚度和阻尼
+
+  可从软件包或对应机器人的模块导入配置：
 
   ```python
   from booster_deploy.robots import K1_CFG
-  # Equivalent:
+  # 等价写法：
   from booster_deploy.robots.k1 import K1_CFG
   ```
 
-  `booster_deploy.robots.booster` remains available as a backward-compatible import path for existing deployments.
+  为兼容现有部署代码，仍可通过 `booster_deploy.robots.booster` 导入。
 
- - `tasks/`: User task definitions and implementations. Each task module contains:
-    - `Policy`/`PolicyCfg` class implementing the inference logic;
-    - a `ControllerCfg` class describing the task configuration including the policy;
-    - registering a task with a `ControllerCfg` instance.
+- `tasks/`：用户任务的定义与实现。每个任务模块包含：
+    - 实现推理逻辑的 `Policy`/`PolicyCfg` 类；
+    - 包含策略配置的 `ControllerCfg` 类；
+    - 将 `ControllerCfg` 实例注册为任务的代码。
 
-   Typical task layout (example):
+  典型任务目录示例：
 
    ```text
    tasks/my_task/
-   ├─ __init__.py        # registers the task via utils.register.register_task
-   ├─ task.py            # Policy and ControllerCfg implementation
-   ├─ models/            # optional policy checkpoints
-   └─ motions/           # optional motion primitives or recordings
+   ├─ __init__.py        # 调用注册函数注册任务
+   ├─ task.py            # Policy 和 ControllerCfg 的实现
+   ├─ models/            # 可选：策略模型文件
+   └─ motions/           # 可选：动作原语或动作数据
    ```
