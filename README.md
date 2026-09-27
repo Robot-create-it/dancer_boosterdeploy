@@ -24,9 +24,17 @@ Booster Deploy 是轻量级策略部署框架，支持在 Booster 实机上运�
 
 ### K1 视觉传球
 
-在机器人上加载 Booster ROS 2 接口和 RoboCup 示例工程的 `vision_interface` 工作空间后，运行 `python scripts/deploy.py --task k1_pass`。启动示例工程的视觉节点，使其在 `/booster_vision/detection` 发布 `Detections` 消息。
+在机器人上加载 Booster ROS 2 接口，编译并加载本仓库 `vision_ws` 后，运行
+`python scripts/start_k1_pass.py --vision-config /opt/booster`。
+入口负责启动或复用视觉、检查相机及 `/head_pose`，再进入 deploy。
+头部在准备阶段开始找球/跟球，并通过现有 `/joint_ctrl` 合入。
+先用 `--vision-only` 检查球坐标，再用 `--head-only` 验证头部与零速度 loco，最后启用 pass。
+完整操作和验证步骤见 [相机与头部测试指南](docs/k1_pass_camera_head_testing.md)。
+通过 SSH 在电脑浏览器看实时识别画面：转发 `8080:127.0.0.1:8080`，
+在机器人运行 `/usr/bin/python3 scripts/view_vision.py`，电脑打开 `http://127.0.0.1:8080`。
+查看器只读订阅现有视觉；支持 NV12、识别框及原图切换，详细步骤见上述指南。
 
-任务从有效的 `Ball` 检测结果中选取置信度最高的球，读取其机器人坐标系下的 `position_projection`，将机器人指向球的方向设为传球方向，并以固定力度 2 运行 `k1_passing_policy_2.onnx`。未检测到球，或球的观测超过 0.5 秒未更新时，机器人保持当前关节位置，直到视觉恢复。Kp/Kd 和传球模型来自 RoboCup 示例工程；策略推理和 `joint_ctrl` 控制循环沿用本工程的 K1 行走部署流程。
+任务从有效的 `Ball` 检测结果中选取置信度最高的球，读取其机器人坐标系下的 `position_projection`，将机器人指向球的方向设为传球方向，并以固定力度 2 运行 `k1_passing_policy_2.onnx`。无有效球或视觉/头部位姿超时时，身体沿用当前关节姿态保持，图像正常时头部仍可找球。Kp/Kd 和传球模型来自 RoboCup 示例工程；策略推理和 `joint_ctrl` 控制循环沿用本工程的 K1 行走部署流程。
 
 ### Python 环境
 

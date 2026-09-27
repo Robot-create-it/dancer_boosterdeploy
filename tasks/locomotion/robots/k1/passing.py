@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from booster_deploy.controllers.controller_cfg import BoosterRobotControllerCfg, ControllerCfg
+from booster_deploy.controllers.controller_cfg import BoosterRobotControllerCfg, ControllerCfg, HeadTrackingCfg
 from booster_deploy.utils.isaaclab.configclass import configclass
 from booster_deploy.utils.registry import register_task
 
@@ -23,6 +23,7 @@ class K1PassTaskCfg(ControllerCfg):
     booster = BoosterRobotControllerCfg(
         joint_stiffness=_PASS["kp_22"],
         joint_damping=_PASS["kd_22"],
+        head_tracking=HeadTrackingCfg(enabled=True),
     )
     robot = _ROBOT.replace(
         default_joint_pos=_PASS["default_dof_pos_22"],

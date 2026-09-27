@@ -1,4 +1,8 @@
 # Task-specific models and data (stored per robot/task)
+vision_ws/build/
+vision_ws/install/
+vision_ws/log/
+logs/
 tasks/**/models/*
 tasks/**/motions/*
 

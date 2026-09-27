@@ -31,6 +31,25 @@ class MujocoControllerCfg:
 
 
 @configclass
+class HeadTrackingCfg:
+    enabled: bool = False
+    # Filled from the robot's calibrated vision.yaml by scripts/deploy.py.
+    fx: float = 0.0
+    fy: float = 0.0
+    color_topic: str = "/StereoNetNode/rectified_image"
+    yaw_min: float = -1.0
+    yaw_max: float = 1.0
+    pitch_min: float = 0.2
+    pitch_max: float = 0.85
+    max_speed: float = 0.6  # rad/s, applied in the 50 Hz control loop
+    smoother: float = 3.5
+    center_tolerance: float = 0.1  # fraction of image size, as in demo
+    detection_max_age: float = 0.5
+    lost_hold_s: float = 0.5
+    scan_interval_s: float = 0.8
+
+
+@configclass
 class BoosterRobotControllerCfg:
     metrics_max_events: int = 2000
     # Mode to enter after Custom control exits. Supported values: "walking", "damping".
@@ -38,6 +57,8 @@ class BoosterRobotControllerCfg:
     # Optional motor-side gains for the real robot; simulation uses RobotCfg.
     joint_stiffness: Optional[List[float]] = None
     joint_damping: Optional[List[float]] = None
+    head_tracking: HeadTrackingCfg = HeadTrackingCfg()
+    head_only: bool = False  # keep the zero-command preparation policy running
 
     def apply_to_robot(self, robot: "RobotCfg") -> "RobotCfg":
         overrides = {}

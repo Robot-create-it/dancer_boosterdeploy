@@ -35,7 +35,8 @@ from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
 from ..utils.remote_control_service import RemoteControlService
-from ..utils.vision_ball import select_ball
+from ..utils.vision_ball import BallObservation, select_ball_observation
+from ..utils.head_ball_tracker import HeadBallTracker
 
 
 logger = logging.getLogger("booster_deploy")
@@ -94,12 +95,25 @@ class BoosterRobotPortal:
     def _init_synced_buffer(self):
         from tasks.locomotion.k1_pass import K1PassPolicyCfg
         self._vision_pass_enabled = isinstance(self.cfg.policy, K1PassPolicyCfg)
+        self.head_tracker = None
+        if self.cfg.booster.head_tracking.enabled:
+            self.head_tracker = HeadBallTracker(self.cfg.booster.head_tracking)
+        self._last_detection_stamp = 0.0
         self.synced_ball = SyncedArray(
             "ball", shape=(1,),
-            dtype=np.dtype([("x", float), ("y", float), ("stamp", float)]),
+            dtype=np.dtype([("x", float), ("y", float), ("stamp", float),
+                            ("image_stamp", float), ("confidence", float),
+                            ("bbox", float, (4,)), ("bbox_valid", bool), ("valid", bool)]),
         ) if self._vision_pass_enabled else None
         if self.synced_ball is not None:
             self.synced_ball.write(np.zeros((1,), dtype=self.synced_ball.dtype))
+        self.synced_vision_state = SyncedArray(
+            "vision_state", shape=(1,),
+            dtype=np.dtype([("width", int), ("height", int),
+                            ("image_received", float), ("pose_received", float)]),
+        ) if self._vision_pass_enabled else None
+        if self.synced_vision_state is not None:
+            self.synced_vision_state.write(np.zeros((1,), dtype=self.synced_vision_state.dtype))
         action_dtype = np.dtype(
             [
                 ("dof_target", float, (self.robot.num_joints,)),
@@ -164,7 +178,7 @@ class BoosterRobotPortal:
                     from vision_interface.msg import Detections
                 except ImportError as exc:
                     raise RuntimeError(
-                        "k1_pass requires the demo vision_interface ROS 2 package"
+                        "k1_pass requires vision_interface; source vision_ws/install/setup.bash"
                     ) from exc
                 self._detections_type = Detections
             self.create_low_cmd_publisher("booster_deploy_low_cmd_pub")
@@ -194,6 +208,15 @@ class BoosterRobotPortal:
                 ),
             )
             if self._vision_pass_enabled:
+                from sensor_msgs.msg import Image
+                from geometry_msgs.msg import Pose
+                self._vision_node = low_state_node
+                low_state_node.create_subscription(
+                    Image, self.cfg.booster.head_tracking.color_topic,
+                    self._image_handler, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+                low_state_node.create_subscription(
+                    Pose, "/head_pose", self._head_pose_handler,
+                    QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
                 low_state_node.create_subscription(
                     self._detections_type,
                     "/booster_vision/detection",
@@ -240,13 +263,42 @@ class BoosterRobotPortal:
         self.low_state_thread.start()
 
     def _vision_handler(self, detections):
-        ball = select_ball(detections)
-        if ball is None:
+        ros_now = self._vision_node.get_clock().now().nanoseconds * 1e-9
+        image_stamp = detections.header.stamp.sec + detections.header.stamp.nanosec * 1e-9
+        # Reject repeated, out-of-order and future frames without refreshing their age.
+        if image_stamp <= self._last_detection_stamp or image_stamp > ros_now + 0.05:
             return
+        self._last_detection_stamp = image_stamp
+        ball = select_ball_observation(detections, time.monotonic(), ros_now,
+                                       self.cfg.policy.ball_max_age)
         sample = np.zeros((1,), dtype=self.synced_ball.dtype)
-        sample[0]["x"], sample[0]["y"] = ball
-        sample[0]["stamp"] = time.monotonic()
+        if ball is not None:
+            for key in ("x", "y", "stamp", "image_stamp", "confidence"):
+                sample[0][key] = getattr(ball, key)
+            sample[0]["valid"] = True
+            if ball.bbox is not None:
+                sample[0]["bbox"] = ball.bbox
+                sample[0]["bbox_valid"] = True
         self.synced_ball.write(sample)
+
+    def _image_handler(self, msg):
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        age = self._vision_node.get_clock().now().nanoseconds * 1e-9 - stamp
+        if msg.width <= 0 or msg.height <= 0 or not -0.05 <= age <= 0.5:
+            return
+        state = self.synced_vision_state.read()
+        state[0]["width"], state[0]["height"] = msg.width, msg.height
+        state[0]["image_received"] = time.monotonic() - max(0.0, age)
+        self.synced_vision_state.write(state)
+
+    def _head_pose_handler(self, msg):
+        q = msg.orientation
+        values = [msg.position.x, msg.position.y, msg.position.z, q.x, q.y, q.z, q.w]
+        if not np.isfinite(values).all() or not 0.9 <= np.linalg.norm(values[3:]) <= 1.1:
+            return
+        state = self.synced_vision_state.read()
+        state[0]["pose_received"] = time.monotonic()
+        self.synced_vision_state.write(state)
 
     def _low_state_handler(self, low_state_msg: LowState):
         self.metrics["low_state_handler"].mark()
@@ -570,6 +622,12 @@ class BoosterRobotPortal:
         prepare_cfg.policy = deepcopy(walk_cfg.policy)
         prepare_cfg.vel_command = deepcopy(walk_cfg.vel_command)
         prepare_cfg.robot.prepare_mode = "walking"
+        if self.cfg.booster.head_tracking.enabled:
+            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
+                i = prepare_cfg.robot.joint_names.index(name)
+                j = self.cfg.robot.joint_names.index(name)
+                prepare_cfg.robot.joint_stiffness[i] = self.cfg.robot.joint_stiffness[j]
+                prepare_cfg.robot.joint_damping[i] = self.cfg.robot.joint_damping[j]
         return prepare_cfg
 
     def start_rl_gait_conditionally(self, wait_for_trigger: bool = True):
@@ -692,11 +750,15 @@ class BoosterRobotPortal:
             print("RL mode initialization cancelled.")
         else:
             if prepare_mode == "walking":
-                print(f"{self.remoteControlService.get_rl_gait_operation_hint()}")
+                if self.cfg.booster.head_only:
+                    print("Head test active: zero-command loco; A/r is disabled. Ctrl+C exits.")
+                else:
+                    print(f"{self.remoteControlService.get_rl_gait_operation_hint()}")
             # main loop: wait for exit signal
             while self.is_running and not self.exit_event.is_set():
                 if (
                     prepare_mode == "walking"
+                    and not self.cfg.booster.head_only
                     and not self.task_start_event.is_set()
                     and self.remoteControlService.start_rl_gait()
                 ):
@@ -769,6 +831,7 @@ class BoosterRobotController(BaseController):
     def __init__(self, cfg: ControllerCfg, portal: BoosterRobotPortal) -> None:
         super().__init__(cfg)
         self.portal = portal
+        self._last_head_diagnostic = -float("inf")
         # Walking preparation starts inference before A/r, but keeps velocity
         # commands masked until that trigger is received.
         self._velocity_commands_enabled = not (
@@ -777,14 +840,26 @@ class BoosterRobotController(BaseController):
         )
 
     def get_ball_position(self, max_age: float):
+        ball = self.get_ball_observation(max_age)
+        return (ball.x, ball.y) if ball is not None else None
+
+    def get_ball_observation(self, max_age: float):
         if self.portal.synced_ball is None:
+            return None
+        now = time.monotonic()
+        vision = self.portal.synced_vision_state.read()[0]
+        if any(not 0 <= now - float(vision[key]) <= max_age
+               for key in ("image_received", "pose_received")):
             return None
         sample = self.portal.synced_ball.read()[0]
         stamp = float(sample["stamp"])
-        age = time.monotonic() - stamp
-        if stamp <= 0 or age < 0 or age > max_age:
+        age = now - stamp
+        if not sample["valid"] or stamp <= 0 or age < 0 or age > max_age:
             return None
-        return float(sample["x"]), float(sample["y"])
+        return BallObservation(float(sample["x"]), float(sample["y"]),
+                               float(sample["confidence"]),
+                               tuple(sample["bbox"]) if sample["bbox_valid"] else None,
+                               stamp, float(sample["image_stamp"]))
 
     def update_vel_command(self):
         if not self._velocity_commands_enabled:
@@ -832,13 +907,50 @@ class BoosterRobotController(BaseController):
                 self.robot.data.device)
 
     def ctrl_step(self, dof_targets: torch.Tensor) -> None:
+        tracker = getattr(self.portal, "head_tracker", None)
+        if tracker is not None:
+            now = time.monotonic()
+            state = self.portal.synced_vision_state.read()[0]
+            size = (int(state["width"]), int(state["height"]))
+            if not 0 <= now - float(state["image_received"]) <= 0.5:
+                size = (0, 0)
+            indices = [self.cfg.robot.joint_names.index(name) for name in
+                       ("aahead_yaw_joint", "aahead_pitch_joint")]
+            measured = [float(self.robot.data.joint_pos[i]) for i in indices]
+            previous_state = tracker.state
+            ball = self.get_ball_observation(tracker.cfg.detection_max_age)
+            target = tracker.update(now, self.cfg.policy_dt, measured, ball, size)
+            if tracker.state != previous_state:
+                logger.info("Head tracker: %s", tracker.state)
+            dof_targets = dof_targets.clone()
+            for i, value in zip(indices, target):
+                dof_targets[i] = value
         for i in range(self.robot.num_joints):
             self.portal.motor_cmd[i].q = float(dof_targets[i].item())
             kp_val = float(self.robot.joint_stiffness[i].item())
             kd_val = float(self.robot.joint_damping[i].item())
             self.portal.motor_cmd[i].kp = kp_val
             self.portal.motor_cmd[i].kd = kd_val
+        if tracker is not None:
+            # The K1 firmware routes the head through its upper-body command
+            # interceptor even when Custom supplies the body targets. Match the
+            # SDK low_level_publisher example: an externally controlled head
+            # joint must carry weight=1; the message default is 0.
+            for i in indices:
+                self.portal.motor_cmd[i].weight = 1.0
         self.portal.low_cmd_publisher.publish(self.portal.low_cmd)
+        if tracker is not None and now - self._last_head_diagnostic >= 1.0:
+            self._last_head_diagnostic = now
+            logger.info(
+                "Head detail: state=%s reason=%s measured=(%.3f,%.3f) "
+                "desired=(%.3f,%.3f) sent=(%.3f,%.3f) weight=(%.1f,%.1f) "
+                "bbox=%s image_size=%s image_age=%.3f pose_age=%.3f",
+                tracker.state, tracker.reason, *measured, *tracker.target,
+                *(self.portal.motor_cmd[i].q for i in indices),
+                *(self.portal.motor_cmd[i].weight for i in indices),
+                ball.bbox if ball is not None else None, size,
+                now - float(state["image_received"]), now - float(state["pose_received"]),
+            )
 
     def stop(self):
         super().stop()
