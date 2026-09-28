@@ -248,8 +248,9 @@ robot = T2_31DOF_CFG.replace(prepare_mode="walking")
 python scripts/deploy.py --task k1_recovery
 ```
 
-按 X/x 保持当前实测姿态，按 A/r 开始恢复。成功后保持末帧目标；默认最多重试两次，
-失败或退出时进入 damping。模型观测、仿真命令和验证范围见
+按 X/x 保持当前实测姿态，按 A/r 开始恢复。成功后保持末帧目标；实机部署入口已禁用自动重试，
+仿真默认最多重试两次，失败或退出时进入 damping。实机堵转后的分阶段调试见
+[recovery 调试流程](docs/k1_recovery_debugging.md)。模型观测、仿真命令和验证范围见
 [recovery 迁移说明](docs/k1_recovery_migration.md)。
 
 ## 仓库结构

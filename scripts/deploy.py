@@ -14,6 +14,8 @@ parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
 parser.add_argument("--recovery-posture", choices=("faceup", "facedown"),
                     help="k1_recovery --mujoco: initial lying posture (default: facedown)")
+parser.add_argument("--recovery-log", metavar="JSONL",
+                    help="k1_recovery: record each policy proposal and measured state; file must be new")
 parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
                     help="k1_pass/k1_shoot --mujoco: initial ball centre in world XY (metres)")
 parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
@@ -40,6 +42,8 @@ args = parser.parse_args()
 
 
 def main():
+    if args.recovery_log is not None and args.task != "k1_recovery":
+        parser.error("--recovery-log requires --task k1_recovery")
     if args.recovery_posture is not None and (args.task != "k1_recovery" or not args.mujoco):
         parser.error("--recovery-posture requires --task k1_recovery --mujoco")
     if args.shoot_policy is not None and args.task != "k1_shoot":
@@ -84,6 +88,18 @@ def main():
         print(f"K1 shoot policy: {selected} (power 6)", flush=True)
 
     # Set device for policy
+    if args.task == "k1_recovery":
+        task_cfg.policy.trace_path = args.recovery_log
+        if not args.mujoco:
+            # Hardware faults are not reliably represented by ROS reserve[0]
+            # on this robot. Do not blindly retry a failed getup.
+            task_cfg.policy.max_retries = 0
+        if args.recovery_log is not None:
+            from pathlib import Path
+            trace_path = Path(args.recovery_log)
+            if trace_path.exists():
+                parser.error("--recovery-log must name a new file")
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
     if args.task == "k1_recovery" and args.mujoco and args.recovery_posture == "faceup":
         task_cfg.mujoco.init_quat[2] *= -1
     task_cfg.policy.device = args.device

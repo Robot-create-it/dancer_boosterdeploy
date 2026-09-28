@@ -6,6 +6,7 @@ checks exercise the real deployment module but do not validate DDS or firmware.
 
 from copy import deepcopy
 import importlib.util
+import runpy
 from pathlib import Path
 from threading import Event
 from types import ModuleType, SimpleNamespace
@@ -286,6 +287,35 @@ class HandoffTests(unittest.TestCase):
 
 
 class RecoveryRobotTests(unittest.TestCase):
+    def test_deploy_entry_disables_hardware_retries_without_starting_ros(self):
+        from booster_deploy.utils.registry import get_task
+        captured = []
+
+        class FakePortal:
+            def __init__(self, cfg):
+                captured.append(cfg)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def run(self):
+                pass
+
+        fake = ModuleType('booster_deploy.controllers.booster_robot_controller')
+        fake.BoosterRobotPortal = FakePortal
+        with patch.dict('sys.modules', {fake.__name__: fake}), \
+                patch('booster_deploy.utils.robot_runtime.require_robot_interface'), \
+                patch('booster_deploy.utils.registry.get_task',
+                      side_effect=lambda name: deepcopy(get_task(name))), \
+                patch('sys.argv', ['deploy.py', '--task', 'k1_recovery']):
+            runpy.run_path(str(ROOT / 'scripts/deploy.py'), run_name='__main__')
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].policy.max_retries, 0)
+        self.assertEqual(captured[0].booster.exit_mode, 'damping')
+
     def test_recovery_uses_loco_low_state_path_and_serial_commands(self):
         cfg = K1RecoveryTaskCfg()
         portal = make_portal(cfg)

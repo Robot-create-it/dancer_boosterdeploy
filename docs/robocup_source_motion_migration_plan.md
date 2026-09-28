@@ -2,9 +2,20 @@
 
 依据 2026-09-27 当前工作区：`dancer_boosterdeploy` HEAD `8429fe3`，`dancer-robocupdemo` HEAD `da8d68d`。demo 的启动、brain 和视觉文件有未提交修改，本文以工作区内容为准。本次只做源码、平台配置和运行状态的只读调查，未切换机器人模式、未发送电机指令、未停止任何平台服务。
 
+修订依据：用户补充确认 demo 的仿真链路与现有实机表现几乎一致。因此，**brain 指令解释、policy 选择及生命周期以 demo 仿真为行为基准，policy 的真机部署细节以 deploy 为基准**。此一致性是用户提供的前提，本次未重新进行仿真/实机对照实验。修订时 deploy 工作区已新增 `k1_recovery` 及相关控制器修改，本文同步更新其接入计划，未修改这些实现文件。
+
 ## 1. 推荐结论与目标边界
 
 在 demo 中新增常驻的源码运控运行时，复用 deploy 已成功使用的 Python 策略和实机关节接口。brain 保留比赛决策，通过专用接口向运行时发送速度、踢球和头部目标；运行时内部切换 loco/pass/shoot，统一输出一条 22 关节的 `/joint_ctrl`。
+
+| 层次 | 迁移基准 | 实施约束 |
+|---|---|---|
+| 指令解释与技能调度 | demo `SimMotion::rpcCallback()`、`step()` | 保留事件、命令缓存、优先级、切换/reset 时机 |
+| policy 家族及子模型选择 | demo `K1KickPolicy::selectFamily/selectRoute`、`K1LocoPolicy::processCmd/selectRoute` | 移植既有规则，命令预处理与路由一起对齐 |
+| 真机输入、推理与关节执行 | deploy 的 policy、proprioception、controller 与机器人配置 | 保留实测状态、单位、关节映射、有效实机增益和 SERIAL 输出 |
+| 控制权与故障监督 | deploy 的 Custom 接管流程，加比赛生命周期适配 | 只在接管/退出边界调用固件，不让比赛动作请求流入固件 |
+
+首版保留原高层 RPC/Kick 消息格式，仅隔离传输端点；不以新建聚合 MotionCommand、重写比赛策略或固定选一个模型代替仿真已有调度。
 
 比赛期间要求：机器人保持 `Custom`；固件内置行走、足球、踢球、起身及上肢动作不得作为比赛动作来源；源码运行时是唯一外部关节命令发布者。比赛暂停仍由源码零速度 loco 维持，不能因暂停、切换技能或重新定位而切回 Walking/Soccer。
 
@@ -88,8 +99,8 @@ brain 的 `currentRobotModeIndex` 实际来自 `fall_down_recovery_state.current
 flowchart TD
     V[现有 vision 与定位] --> B[现有 brain / 行为树]
     G[现有裁判与队间通信] --> B
-    B -->|专用 MotionCommand| R[源码 motion runtime]
-    R --> P[loco / pass / shoot 策略管理器]
+    B -->|源码专用 RPC / Kick 话题| R[源码 motion runtime]
+    R --> P[按 SimMotion 调度 loco / pass / shoot / recovery]
     S[low_state] --> P
     P --> J[唯一 JointCommandWriter]
     R -->|brain 头部目标| J
@@ -100,23 +111,25 @@ flowchart TD
     R -->|MotionStatus| B
 ```
 
-建议新增 `motion_interfaces` 和 `source_motion` ROS 2 包，保留 brain 的 C++ 实现，首版继续使用 deploy 的 Python/ONNX Runtime 推理代码，避免同时改语言和控制行为。
+建议新增 `source_motion` ROS 2 包，保留 brain 的 C++ 实现，首版继续使用 deploy 的 Python/ONNX Runtime 推理代码。将 SimMotion 的指令解释和状态机按原语义移植到运行时中；输入改成实测状态，输出改成 deploy 的 LowCmd。状态/生命周期接口可放入独立 `motion_interfaces` 包，现有 RPC/Kick 类型继续复用。
 
 `motion.backend = source | firmware` 是启动时固定的二选一配置。默认比赛入口使用 source；只有完全退出 source 会话后才能显式回滚 firmware。禁止 source 失败后自动降级到固件行走。
 
-source 后端建议每个 brain tick 末尾发布一份完整 `MotionCommand` 快照：
+首版接口安排：
 
-| 字段组 | 内容 |
+| 接口 | 内容 |
 |---|---|
-| 会话与新鲜度 | brain 实例 ID、sequence、时间戳、有效期、技能会话 ID |
-| 身体意图 | idle/loco/visual_kick/stop/fault，以及 `vx, vy, wz` |
-| 踢球参考 | 原 `Kick` 的 x/y/dir/power/goal/朝向，加有效标志、参考更新时间/来源 |
-| 头部 | yaw/pitch、有效标志、头部意图归属 |
-| 比赛约束 | 当前允许的运动类别、暂停/终止状态 |
+| `/dancer/source_motion/rpc_req` | 原 `booster_msgs/RpcReqMsg`，保留 API ID、JSON body 及事件顺序 |
+| `/dancer/source_motion/kick_reference` | 原 `brain/Kick`，保留 x/y/dir/power 等字段及其更新语义 |
+| source heartbeat / lifecycle | brain 实例和监督会话标识，ready、停止与存活信息；不重新定义比赛技能选择 |
+| source status | 实际所有权、policy/family/route、故障和输入/输出年龄 |
+| 固件 `/booster_rpc_service` | 仅供监督层查询、接管和退出；与本地模拟的高层模式请求分开 |
 
-将 `RobotClient` 调用改为更新快照，在 `tree->tick()` 和 `pubKickMsg()` 完成后一起发布，避免 start 事件先到而本帧球参考尚未到达。每个 tick 刷新快照也能兼容仅在 `onStart()` 设置一次速度、随后保持的行为节点；不能简单对原始稀疏 API 事件加一个过短 TTL。
+`RobotClient` 增加可配置的动作发布话题，`pubKickMsg()` 增加可配置的参考发布话题，source 启动时指向上述私有端点。不要将整个 brain 的所有 `LocoApiTopicReq` 发布者一律重映射，因为独立的 2017 诊断查询还可能需要真实固件响应；诊断可改为读运行时状态。
 
-source 模式下 `pubKickMsg()` 填入专用快照，不向固件 `/kick_ball` 发送。调试所需可单独发布 `/dancer/kick_reference`。firmware 模式继续使用原协议。
+运行时像 SimMotion 一样缓存最新速度、头角、VisualKick 开关和 Kick 参考，在每个控制周期读取一致的内部状态。两话题到达的先后关系以及缺参考时的行为按仿真实现复现，不要求额外“每帧同序号”条件。某些行为仅在 onStart 发送一次速度，因此监督 brain 的独立存活信号，不能对每条运动事件加短 TTL 后擅自清零。
+
+source 模式下不再向固件 `/kick_ball` 或运动 RPC 话题发布比赛动作。firmware 后端保留原端点；禁止将私有话题桥接回固件。旧实例/退出后队列的处理归监督生命周期，正常比赛中的球缓存和技能状态则按 SimMotion 保留。
 
 `MotionStatus` 回报实际接管状态、当前技能/模型、最近接受的会话和序号、传感器年龄、推理延迟及错误。brain 据此决定运行/等待/停止；发布成功不能继续被解释为动作已执行。
 
@@ -126,22 +139,39 @@ RPC 查询/等待必须与 50 Hz 输出循环分离并设置硬超时。状态�
 
 ## 5. brain 各入口如何迁移
 
+以下规则直接来自 [SimMotion 指令解释](/home/booster/Workspace/dancer-robocupdemo/src/sim_adapter/sim/src/motion.cpp:168) 与 [policy 调度](/home/booster/Workspace/dancer-robocupdemo/src/sim_adapter/sim/src/motion.cpp:351)，作为逐事件回放的期望结果：
+
+| 仿真输入/状态 | 应复现的行为 |
+|---|---|
+| `2001 Move` | 更新缓存速度；不会直接取消 VisualKick |
+| `2004 RotateHead` | 更新缓存 pitch/yaw，在身体输出后覆盖头部 |
+| `2038 start=true/false` | 设置/清除 VisualKick 激活标志；启动条件还需 Kick 参考或已缓存视觉球 |
+| `2008 GetUp` | 锁存起身请求；起身优先于踢球/行走，执行期间自保持 |
+| 本地 `2000 mode=Walking` | 清除视觉踢球标志；不把 Walking 请求转发到真机固件 |
+| 本地 `2000 mode=Soccer` | 按仿真更新本地模式语义；brain 随后发送的 VisualKick(false) 仍独立生效 |
+| 每周期选择 | damping 分支 → getup → 激活且有球参考的 visionkick → 默认 loco |
+| selected policy 改变 | 调用新 policy 的 reset；进入 getup 清除 VisualKick 标志 |
+| getup 完成 | 清除请求，设置 1.2 秒跌倒重触发宽限；严格按代码条件处理显式请求/严重倒地例外 |
+
+真机 Custom 是物理控制权，本地 Walking/Soccer 是比赛指令语义，两者分开保存。逻辑 Damping 的低层输出需使用 deploy 的实机处置；不照搬仿真 `JointCommand{}` 的零增益输出。仿真自动倒地检测中的真值高度不可直接搬到真机，需用可获得的反馈适配，并单列差异。
+
 | 当前入口 | source 后端行为 |
 |---|---|
 | `setVelocity / crabWalk / moveToPose...` | 写入物理单位速度；进入 loco 的本地命令处理 |
 | `RLVisionKick(true)` | 开启本地技能会话；等待合格参考后选 pass/shoot |
-| `RLVisionKick(false) / robocupWalk()` | 结束本地踢球会话，切回源码 loco，清除旧移动意图 |
-| `changeRobocupMode() / walkMode()` | 请求本地 loco 就绪，禁止发送 Soccer/固件 gait 切换 |
+| `RLVisionKick(false) / robocupWalk()` | 清除本地激活标志，后续由 SimMotion 优先级选择；速度缓存按原指令序列处理 |
+| `changeRobocupMode()` | 原高层请求送入私有端点，按仿真解释；禁止发送到固件 Soccer |
+| `walkMode()` | 仿真没有实现的内部 API 不擅自映射为其他技能，记录为未支持入口 |
 | `moveHead()` | 写入 head mux，由唯一 writer 输出头关节 |
-| `standUp()` | 转入源码恢复接口；首版未具备实机起身时明确返回 unsupported/fault |
+| `standUp()` | 按仿真锁存 getup 请求，调用 deploy recovery 执行适配器；未完成实机验收时受配置门禁限制 |
 | `enterDamping()` | 经 supervisor 撤销技能和输出许可，再执行受控退出 |
-| `waveHand / kickBall / fancyKickBall` | 实现对应源码动作前禁用并回报不支持，禁止兜底调用固件 |
+| `waveHand / kickBall / fancyKickBall` | 保留仿真未实现/无动作的处理并记录诊断，禁止兜底调用固件或猜测对应 policy |
 
 目前 `kickBall/fancyKickBall/walkMode/enterDamping` 的实现仍在类里，但本次搜索未发现其在现有 brain `.cpp` 中的调用；仍应封闭这些未来可能被复用的入口。WaveHand 有行为节点调用。
 
 协议审计覆盖 `2000 ChangeMode`、`2001 Move`、`2004 RotateHead`、`2005 WaveHand`、`2008 GetUp`、`2038 VisualKick` 及内部踢球 `100011/100012`。source brain 不直接发布这些固件运动请求；接管/退出所需的 2000 只能由运行时监督层按状态机发出，2017/2018 查询可保留为只读。
 
-还要处理 [game.xml](/home/booster/Workspace/dancer-robocupdemo/src/brain/behavior_trees/game.xml:26) 定位分支中的 `RobocupWalk`：文件顶部同名初始化虽已注释，该分支仍会切 Soccer。仅删一个初始化调用不够。
+还要覆盖 [game.xml](/home/booster/Workspace/dancer-robocupdemo/src/brain/behavior_trees/game.xml:26) 定位分支中的 `RobocupWalk`：文件顶部同名初始化虽已注释，该分支仍会发 Soccer 请求。保留其仿真业务语义，将请求隔离在本地解释器内，不通过删节点改变比赛逻辑。
 
 诊断部分独立发布 `2017 GetMode`，不在 RobotClient 内。它可以继续只读查询，但 source 模式更适合统一消费运行时状态，避免漏查第二个 RPC 发布入口。
 
@@ -157,7 +187,7 @@ RPC 查询/等待必须与 50 Hz 输出循环分离并设置硬超时。状态�
 6. writer 开始连续输出零速度源码 loco，显式接管两个头关节；再次验证 Custom 下的 low_state、head_pose、odom 和状态流，再公布 `motion_ready`。
 7. brain 解除输出门禁。比赛入口可以自动完成原来的 X/A 流程；它只在机器人已经具备可接管姿态时放行，启动命令不隐含从任意倒地状态自动站起。
 
-正常技能切换只发生在 source 内部，固件始终保持 Custom。READY、SET、PLAY、暂停、END 等阶段的具体行为仍来自原比赛逻辑；运行时用许可字段保证停止阶段无法保留旧踢球会话。不能把所有非 PLAY 状态统一屏蔽，因为 READY 等阶段仍需移动定位。
+正常技能切换只发生在 source 内部，固件始终保持 Custom。READY、SET、PLAY、暂停、END 等阶段的具体行为继续由原 brain/行为树决定，运行时复现仿真对其事件序列的处理。不能把所有非 PLAY 状态统一屏蔽，因为 READY 等阶段仍需移动定位。正常暂停必须核对实际的 VisualKick(false)/Walking 取消事件，单独 Move(0,0,0) 不会终止视觉踢球；监督层的故障撤销另行处理。
 
 ### 各类停止的不同处理
 
@@ -165,7 +195,8 @@ RPC 查询/等待必须与 50 Hz 输出循环分离并设置硬超时。状态�
 |---|---|
 | 比赛暂停、SET、END | 取消踢球、速度清零，Custom 内继续源码零速度 loco；后续行为服从比赛状态 |
 | brain 心跳失效 | 立即撤销踢球与移动；状态正常时进入有界源码零速度维持，超过故障处理期限后受控退出 |
-| low_state 超时、推理超时/NaN、跌倒 | 停止接受策略目标，进入故障处理；不得继续重发无限期旧目标 |
+| low_state 超时、推理超时/NaN | 停止接受策略目标，进入故障处理；不得继续重发无限期旧目标 |
+| 跌倒 | 完成 recovery 实机验收后按仿真优先级进入源码起身；验收前退出到故障处置 |
 | 发现模式不再为 Custom 或存在意外动作 | 撤销输出许可、锁存故障；禁止与其他控制者反复争抢模式 |
 | 正常结束整个比赛进程 | 撤销 brain 许可与技能，执行有界减速；确认 writer 不再发送运动目标，执行 Damping 交接并确认，再退出进程 |
 | Ctrl+C / SIGTERM / worker 崩溃 | 同一 supervisor 路径处理，不回 Walking/Soccer |
@@ -191,7 +222,7 @@ Damping 是退出/急停后的底层保护状态，会撤掉主动支撑，不�
 | 动作处理 | 当前 default pose、映射、clip、scale=0.25、filter=0.8、历史顺序和 previous action 语义 |
 | 电机增益 | 各技能最终应用实机覆盖后的 kp/kd；切换时同步更新，准备阶段也必须使用对应有效配置 |
 
-当前 loco 实现已经没有旧文档提到的 `vyaw=0.2` 准备命令、速度渐增或 gravity offset 加法。虽然 JSON 仍含 `gravity_offset`，当前 Python 路径未使用它。首版以实际 deploy 代码为基线，不因读取旧排查文档或复制 sim C++ 实现而重新引入这些差异。
+当前 deploy loco 已不使用旧文档中的 `vyaw=0.2` 准备命令、速度渐增或 gravity offset 加法。仿真 loco 的 `processCmd` 则包含变化率限制，且 `selectRoute` 使用处理后的命令。这些差异必须按层处理：用于决定路由的命令预处理和选择规则以仿真为准、一起移植，并将同一处理结果用于策略命令观测，避免再经过 deploy 原处理器二次整形；实测姿态/重力读取、单位与实机增益继续以 deploy 为准。gravity offset、默认姿态与滤波等数值差异要列入适配清单并逐项回放，不能整体复制仿真 buildFrame 覆盖 deploy，也不能宣称二者数值天然相同。`adjust` 只在仿真确实设置该标志的路径生效，不能把它当作实机启动准备阶段。
 
 ### 速度
 
@@ -202,21 +233,21 @@ brain 自身仍有小速度最小值补偿和上限，首版保留并在联调�
 ### 踢球参考、模型和会话
 
 - deploy 当前使用 `atan2(ball_y, ball_x)` 作为试验方向。比赛必须使用 brain 的 `Kick.dir`，它已在机器人坐标系，不能再减一次机器人朝向；球 x/y 同样使用 brain 提供的机器人坐标。
-- pass 首版保留已验证的 power-2 模型。brain 常规传球为 2，定位球/守门员默认 2.5 经参考实现限幅也为 2；若要支持 0.5–1.5 等弱传球，需要补齐 pass 的 0/1 模型及路由，不能把任意 power 当作已验证能力。
+- pass 完整接入仿真三模型路由：将 power 限制到 [0.5,2] 后，<1 选 0，<1.5 选 1，其余选 2。deploy 当前的 power-2 是已成功的执行基线，缺少的 0/1 模型从 demo 补齐并验证部署。固定 power-2 可以用作早期硬件冒烟测试，但不能替代完整比赛调度。
 - `power>5` 选择 shoot，其观测中的方向向量幅度仍是 1，不能填 6；其余正常比赛 power 选择 pass。power=5 在当前仿真 helper 回落 pass，应明确记录此边界行为。
 - 五个 shoot 模型的自动路由参考 [kick_policy.cpp](/home/booster/Workspace/dancer-robocupdemo/src/sim_adapter/sim/src/policy/kick_policy.cpp:180)：`e=wrap(dir-atan2(ball_y,ball_x))`；e>1.2 选 0109_0，>0.3 选 2，>-0.4 选 264，>-1.2 选 192，其余 0109_2。已有 route 且球距<1 m 时保持路线。每条路线使用自身球位置/yaw offset。
-- 固定模型运行成功不等于这些自动切换已在实机验证。先接通固定 pass/shoot，再单独验收自动 route。
+- 采用用户确认过表现的仿真路由作为规格，移植时通过事件回放验证实现没有改变模型选择；硬件冒烟测试可以固定模型，最终运行必须恢复完整自动路由。
 - family 在一次 VisualKick 会话起始锁定；同一 family 内路由复用观察历史、previous action、过滤器与交替标志。会话结束、再次进入及跨 family 的 reset 必须明确，不能每个指令帧都 reset 或重新加载网络。
-- 保留最近有效的原始球参考以处理短时漏检，offset 只在构建当前观测时施加一次。缓存不代表无限技能授权：取消、暂停、brain 心跳超时、会话期限优先终止技能。新会话启动要求新鲜的合格参考，旧缓存不能单独触发新踢球。
-- `ball_valid=false` 与“新鲜度字段停止更新”要区分；brain 的参考可能是预测/拦截目标，不能偷偷退回 deploy 的原始检测球覆盖它。
+- 保留仿真的 Kick 参考和视觉球锁存行为，offset 只在当前观测中施加一次；policy reset 不擅自清空运动层球参考。先有视觉球、后有 brain Kick 参考时，保留临时 pass → 首次 family 锁定及必要的历史重置。比赛中的可用性/超时决策继续由现有 brain 驱动，不额外引入“新技能必须有新检测”来改变行为。
+- brain 的 Kick 参考有效时优先使用它；尚无参考时的视觉球回退按 SimMotion 适配真实视觉输入，不能使用仿真相机真值。监督层在 brain 失联、运行时重启或控制权丢失时撤销输出许可，这与正常漏检时继续使用缓存是不同的事件。
 
 ### 切换连续性与头部
 
-全部技能模型在接管前加载；只保留一个运行时和一个 writer。loco → kick 首帧沿用当前实测姿态作为过滤起点；kick → loco 按测量状态和最后输出初始化连续交接，不能回用数秒前的 loco 历史。切换规则经离线轨迹回放与实机分阶段验证后固定。
+全部技能模型在接管前加载；只保留一个运行时和一个 writer。严格保留 SimMotion 的 `selected != active` 才 reset、getup 自保持和完成后交还规则。loco → kick 首帧从实测姿态初始化过滤器；kick → loco 按仿真 reset 语义初始化，不复用暂停前的陈旧历史。如果真机需要额外交接插值，应作为明确的底层适配差异验证，不能顺便改变 policy 选择或 reset 时机。
 
-首版让 brain 拥有所有头部意图，包含找球、扫场定位、踢球低头；关闭 deploy 的自动 HeadBallTracker。writer 统一限位/限速并合入索引 0、1，保持已验证的 `weight=1` 处理；上肢其他索引不盲目全设 1，要验证原 Custom 路径和 action 清理结果。
+按仿真保留 brain 头部请求和身体输出后的头部合并，关闭 deploy 的自动 HeadBallTracker。真机 writer 使用 deploy 已验证的头关节输出和 `weight=1`；额外限速等若与仿真直接目标不同，须作为部署差异记录。上肢其他索引不盲目全设 1，要验证原 Custom 路径和 action 清理结果。
 
-现有 `RLVisionKick` 与 CamFindAndTrackBall 会同时产生头部请求，且踢球覆盖并非每 tick 都重新发送。聚合快照要保留“踢球会话覆盖”的持续优先级，不能简单采用最后调用覆盖并让下一帧 CamTrackBall 抢回头部。丢失 brain 后按监督状态处理，不能再并行启用第二套自动扫描。
+现有 `RLVisionKick` 与 CamFindAndTrackBall 会同时产生头部请求；仿真按实际到达顺序更新最新目标。首版保留这一行为，通过同序列回放对照头部输出，不新增一个持续优先级仲裁器改变原语义。recovery 独立任务当前让头部跟轨迹，仿真比赛运行时却在身体 policy 后覆盖 brain 头角，这个组合差异需要在 recovery 比赛适配时明确验证。
 
 ## 8. 里程计、头部位姿和起身缺口
 
@@ -224,21 +255,23 @@ brain/vision 继续依赖实测 `/low_state`、`/head_pose`、`/odometer_state`�
 
 如果 Custom 下 odom 不工作，可以在独立、明确的话题上接入 demo 的 K1 里程计模型实现再 remap brain；现有 `scripts/k1_odom_estimator.py` 是估计计算工具，不是已完成的 ROS 实机发布节点。避免在原话题叠加第二个不受控发布源。`head_pose` 必须由实测关节和正确运动学计算，不能用目标头角伪造。
 
-**全源码比赛还缺经过实机验证的起身。** 当前 deploy 的 loco/pass/shoot 不能替代 `CheckAndStandUp → 固件 GetUp`。demo 虽有仿真 getup 源码与恢复资源，但迁到实机仍需关节映射、轨迹/模型、增益、姿态识别和失败退出验证。
+修订时 deploy 已有 [K1RecoveryPolicy](/home/booster/Workspace/dancer_boosterdeploy/tasks/locomotion/k1_recovery.py:100) 与 [迁移记录](/home/booster/Workspace/dancer_boosterdeploy/docs/k1_recovery_migration.md)。其记录包括离线验证和 MuJoCo 起身结果，同时明确未操作实机。因此不再按“起身尚无源码实现”规划，应复用现有 recovery 执行路径，补齐与 SimMotion 的比赛调度衔接及实机验收。
 
-第一阶段应明确“跌倒即退出、等待恢复”，关闭自动固件 GetUp；完成源码 getup 后再声称具备完整的源码自主比赛恢复能力。允许固件起身后再交还 Custom 是另一种混合方案，不满足比赛期间只有源码产生动作的要求，不作为本方案默认行为。
+需要处理的具体衔接是：独立 recovery 成功后保持最终目标，而比赛运行时应消费 succeeded 并按 SimMotion 交还 loco；独立任务默认重试上限与仿真无限重试不同，应明确其作为实机故障边界；recovery 使用 22 关节单帧观测和自己的目标生成，不得套用 loco 的 20 关节重排、action scale 或滤波；跌倒触发不能先让 loco 的通用安全退出终止整个运行时，必须在监督层将可恢复跌倒交给 recovery。
+
+实机起身验收前明确“跌倒即退出、等待恢复”；通过后接入仿真的请求/自保持/完成/宽限逻辑。禁止 `CheckAndStandUp` 直接调用真实固件 GetUp。允许固件起身后再交还 Custom 是另一种混合方案，不满足本方案的排他要求。
 
 ## 9. 文件级实施清单
 
 | 位置 | 变更 |
 |---|---|
-| 新增 `src/motion_interfaces/` | MotionCommand、MotionStatus、生命周期控制接口 |
-| 新增 `src/source_motion/` | policy manager、robot I/O、唯一 writer、ownership supervisor、配置/launch |
+| 新增 `src/motion_interfaces/`（按需） | MotionStatus、存活/生命周期接口；动作继续复用原 RPC/Kick 消息 |
+| 新增 `src/source_motion/` | 从 SimMotion 移植命令解释与 policy manager，加入 deploy robot I/O、唯一 writer、ownership supervisor、配置/launch |
 | deploy 的 policy/配置/推理依赖 | 迁入可安装 Python 库并保留许可与来源；不依赖绝对路径访问旁边 deploy checkout |
 | demo `models/` | 复用已核对模型，安装时打包 manifest/哈希，显式模型根目录 |
-| `src/brain/src/robot_client.cpp` 与头文件 | source/firmware 后端选择，所有动作入口统一走所选后端 |
-| `src/brain/src/brain.cpp`、相关状态结构 | 合并 Kick 参考、tick 末尾快照、接管状态门禁与故障处理 |
-| `src/brain/src/brain_tree.cpp` | RobocupWalk、本地 VisualKick 取消/确认、头部优先级、起身能力处理 |
+| `src/brain/src/robot_client.cpp` 与头文件 | 配置 source/firmware 目标话题，保留消息构造与调用语义 |
+| `src/brain/src/brain.cpp`、相关状态结构 | 配置 Kick 专用端点、加入存活信号/接管门禁，区分本地技能状态与真实固件状态 |
+| `src/brain/src/brain_tree.cpp` | 保留已有技能调用顺序；仅适配所有权状态和恢复反馈，不重写比赛选择逻辑 |
 | brain config/launch | 启动时固定 backend，传递 source 状态和模型/时限配置 |
 | `scripts/start.sh` | 顺序启动、ready 条件、单实例、失败回收；保留本地相机和时钟修复 |
 | `scripts/stop.sh` | 先撤销技能与交接，再停进程；替换原有 killall -9 主路径 |
@@ -249,12 +282,12 @@ brain/vision 继续依赖实测 `/low_state`、`/head_pose`、`/odometer_state`�
 
 | 阶段 | 交付与通过条件 |
 |---|---|
-| A：离线迁移 | 模型/配置固定；相同状态与参考产生与 deploy 基线一致的 obs、action、关节命令；路由、reset、取消、暂停、过期、模式错误有测试 |
+| A：离线迁移 | 双基准：相同高层事件/状态产生与 SimMotion 一致的 policy/family/route/reset/缓存演变；相同已选技能与真机输入通过 deploy 基线得到相同关节命令，明确列出命令整形等适配差异 |
 | B：shadow 运行 | 接真实 brain/传感器但无 joint_ctrl 发布、无模式修改；记录拟选技能、延迟、头部和踢球方向；核对 source brain 没有发出固件运动请求 |
 | C：Custom 接管与 loco | 在受控支撑条件下验证接管/退出、状态闭环、头部/双臂来源和零速/低速 loco；异常 RPC 超时不能放行 |
-| D：pass/shoot 闭环 | 固定模型→战术 dir/power→五路 shoot；验证技能多次切换和脑端中断；不因收到 /kick_ball 就开始踢球 |
+| D：pass/shoot 闭环 | 固定模型仅用于硬件冒烟；完整接入仿真 pass 三路/shoot 五路、family 锁存与缓存；验证技能切换和脑端中断，不因收到参考就开始踢球 |
 | E：比赛生命周期 | READY/SET/PLAY/暂停/END、重新定位、brain 重启、重复启动、worker 崩溃、模式被外部改变、low_state 中断、SIGTERM 和监督故障注入 |
-| F：源码恢复 | 迁移并验证 getup；通过后才能验收包含跌倒恢复的完整源码自主比赛 |
+| F：源码恢复 | 接入已有 deploy recovery，完成成功后回 loco、重试/故障边界、头部合并和实机验证；通过后验收完整源码自主比赛 |
 
 需要同时保留的验收证据：
 
@@ -264,6 +297,8 @@ brain/vision 继续依赖实测 `/low_state`、`/head_pose`、`/odometer_state`�
 4. 50 Hz 控制在 vision/brain 同时运行时满足期限，超时不积压补发；记录 command/state/action 年龄和 inference 延迟。
 5. 故障时取消旧会话、不自动恢复固件行走、不因 supervisor 重启立即执行旧指令；重新接管需全新会话和完整状态确认。
 
+调度回放至少覆盖：Move 清零但 VisualKick 仍开启、false 后回 loco、仅有视觉缓存时启动、Kick 参考稍后到达并锁存 family、近球 shoot route 锁定、路由切换保留历史、跨 policy reset、getup 抢占与完成后返回、头角事件交错，以及逻辑 Walking/Soccer 不改变真机 Custom。仿真序列是期望结果来源；硬件故障监督引起的例外需单独标注。
+
 ## 11. 本次只读实机核查与未验证项
 
 - 6 秒采样收到 low_state 1676 条、head_pose 340 条、odometer_state 1659 条、recovery_state 3 条；low_state 为 22 个 serial motor。此计数包含发现与回调开销，不当作精确传感器频率指标。
@@ -272,4 +307,4 @@ brain/vision 继续依赖实测 `/low_state`、`/head_pose`、`/odometer_state`�
 - 本次没有进入 Custom，因而没有实测 Custom 排他性、Custom 下里程计有效性、命令丢失保护或电机交接。上述项目是方案的实施验收条件，不能视作本次已完成验证。
 - `/opt/booster/version.txt` 含两条历史版本记录（最新记录 v1.6.1.1），而 deploy README 的最低版本陈述不一致。应以本机能力探测、实际加载的配置和模块版本确定兼容性，不能根据 README 单一版本号承诺支持。
 
-最终推荐交付是：**保留 demo 比赛入口，新增一个常驻源码运动运行时；利用 Custom 选择源码目标，封闭所有内置比赛动作入口；先完成 loco/pass/shoot 和受控退出，再补齐源码起身。**
+最终推荐交付是：**保留 demo 比赛入口与高层指令语义，按仿真链路移植 policy 调度，按 deploy 接入真机执行；比赛始终由唯一源码运行时通过 Custom 输出，完成已有 recovery 的比赛衔接与实机验收。**

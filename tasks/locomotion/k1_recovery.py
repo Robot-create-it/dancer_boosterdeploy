@@ -60,6 +60,10 @@ class K1RecoveryPolicy(Policy):
         self._model = create_policy_runner(resource(cfg.checkpoint_path), self.device)
         self.last_action = torch.zeros(22, device=self.device)
         self.reset()
+        self.trace = None
+        if cfg.trace_path is not None:
+            from booster_deploy.utils.recovery_trace import RecoveryTrace
+            self.trace = RecoveryTrace(cfg.trace_path, self)
 
     def reset(self):
         self.retries = 0
@@ -98,6 +102,17 @@ class K1RecoveryPolicy(Policy):
         )).clamp(-self.cfg.clip_observation, self.cfg.clip_observation)
 
     def inference(self):
+        try:
+            target = self._inference()
+            if self.trace is not None:
+                self.trace.record(self, target)
+            return target
+        except Exception as exc:
+            if self.trace is not None:
+                self.trace.write({'type': 'error', 'message': str(exc)})
+            raise
+
+    def _inference(self):
         q, dq, gyro, gravity = read_proprioception(self.robot.data)
         if any(not torch.isfinite(value).all() for value in (q, dq, gyro, gravity)):
             raise RuntimeError("Non-finite recovery sensor input")
@@ -164,3 +179,4 @@ class K1RecoveryPolicyCfg(PolicyCfg):
     phase_pre_roll_s: float = 1.0
     retry_margin_s: float = 2.0
     max_retries: int = 2
+    trace_path: str | None = None

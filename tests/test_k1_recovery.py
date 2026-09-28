@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import unittest
+import tempfile
 from unittest.mock import Mock
 
 import numpy as np
@@ -186,6 +187,40 @@ class RecoveryTests(unittest.TestCase):
         self.controller.robot.data.joint_pos[3] = float('nan')
         with self.assertRaisesRegex(RuntimeError, 'sensor input'):
             self.controller.policy_step()
+
+    def test_trace_records_proposals_without_changing_inference(self):
+        from booster_deploy.utils.recovery_trace import RecoveryTrace, summarize_trace
+        c, p = self.controller, self.controller.policy
+        p.settle_time = 1.
+        expected = c.policy_step().clone()
+        c.start()
+        p.settle_time = 1.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'trial.jsonl'
+            p.trace = RecoveryTrace(path, p)
+            try:
+                actual = c.policy_step()
+                torch.testing.assert_close(actual, expected)
+                # The last frame must already be on disk before close/exit.
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                self.assertEqual(len(rows), 2)
+                frame = rows[-1]
+                np.testing.assert_allclose(frame['target_proposed'], actual)
+                np.testing.assert_allclose(frame['pd_estimate'],
+                    c.robot.joint_stiffness * (actual - c.robot.data.joint_pos))
+                self.assertEqual(len(frame['observation']), 100)
+                summary = summarize_trace(path)
+                self.assertEqual(summary['executing_frames'], 1)
+                self.assertEqual(len(summary['joints']), 22)
+                with self.assertRaises(FileExistsError):
+                    RecoveryTrace(path, p)
+                c.robot.data.joint_pos[0] = float('nan')
+                with self.assertRaises(RuntimeError):
+                    c.policy_step()
+                self.assertEqual(json.loads(path.read_text().splitlines()[-1])['type'], 'error')
+            finally:
+                p.trace.close()
+                p.trace = None
 
 
 if __name__ == '__main__':

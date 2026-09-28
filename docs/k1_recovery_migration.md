@@ -83,7 +83,9 @@ demo C++ 的 perception 接口使用度，需要乘 π/180；本仓库 loco 的�
 单独运行的任务成功后保持最后目标，状态为 `succeeded`，不自动切换为 loco。
 成功条件保留源实现：轨迹完成且 `projected_gravity.z < -0.5`。
 轨迹完成后仍倒地超过 2 s，清空 residual、重新等待稳定和选择姿态。
-与 demo 仿真内部无限重试不同，此独立任务默认最多重试两次，之后停止控制器；
+与 demo 仿真内部无限重试不同，仿真配置默认最多重试两次。
+2026-09-27 实机发现堵转后，`scripts/deploy.py` 的实机 recovery 入口将重试次数设为 0，
+首次恢复超时即停止控制器，避免带故障重复起身；这不等于已实现堵转即时中止。
 任务默认退出模式为 damping。外部管理器可读取 policy 的 `state` / `retries`，
 在新会话调用 `reset()`，但本次未把自动恢复加入 loco。
 
@@ -104,3 +106,6 @@ python -m unittest discover -s tests -v
 使用通用 `MujocoController` 完成闭环起身：仰卧 259 个控制周期（5.18 s），
 俯卧 294 个周期（5.88 s），均零重试，结束时根节点高度约 0.55 m。
 对应自动测试为 `test_k1_recovery_sim.py`。这些结果不替代实机起身验证；本次未操作实机。
+
+后续实机失败记录见 `k1_recovery_hardware_diagnosis_20260927.md`，
+继续调试前按 `k1_recovery_debugging.md` 完成输出和故障通道核实。
