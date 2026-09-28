@@ -37,6 +37,7 @@ from ..utils.isaaclab import math as lab_math
 from ..utils.remote_control_service import RemoteControlService
 from ..utils.vision_ball import BallObservation, select_ball_observation
 from ..utils.head_ball_tracker import HeadBallTracker
+from ..utils.recovery_safety import feedback_fault, limit_arm_targets, state_fault
 
 
 logger = logging.getLogger("booster_deploy")
@@ -55,6 +56,16 @@ class BoosterRobotPortal:
         # Keep the registered task's simulation configuration intact.
         self.cfg = deepcopy(cfg)
         self.cfg.robot = self.cfg.booster.apply_to_robot(self.cfg.robot)
+        if self.cfg.booster.recovery_safety:
+            if self.cfg.robot.name != 'Booster_K1' or self.cfg.robot.prepare_mode != 'hold':
+                raise ValueError('Recovery safety requires K1 hold preparation')
+            if self.cfg.booster.exit_mode != 'damping':
+                raise ValueError('Recovery safety requires damping exit')
+            for value in (self.cfg.booster.recovery_state_max_age,
+                          self.cfg.booster.recovery_ready_duration,
+                          self.cfg.booster.recovery_command_max_age):
+                if not np.isfinite(value) or value <= 0:
+                    raise ValueError('Recovery safety timeouts must be positive and finite')
 
         self.robot = BoosterRobot(self.cfg.robot)
 
@@ -68,6 +79,14 @@ class BoosterRobotPortal:
         self.exit_event = mp.Event()
         self.velocity_commands_enabled_event = mp.Event()
         self.task_start_event = mp.Event()
+        self.recovery_active_event = mp.Event()
+        self.recovery_ready_event = mp.Event()
+        self.recovery_go_event = mp.Event()
+        # Shared across fork: do not fork while the hold thread is inside publish().
+        self._recovery_publish_lock = mp.Lock()
+        self._recovery_hold_stop = threading.Event()
+        self._recovery_hold_thread = None
+        self._recovery_hold_target = None
         self.low_state_received_event = threading.Event()
         self.is_running = True
         def signal_handler(sig, frame):
@@ -120,6 +139,7 @@ class BoosterRobotPortal:
                 ("dof_target", float, (self.robot.num_joints,)),
                 ("stiffness", float, (self.robot.num_joints,)),
                 ("damping", float, (self.robot.num_joints,)),
+                ("published_at", float),
             ]
         )
         self.synced_action = SyncedArray(
@@ -127,7 +147,8 @@ class BoosterRobotPortal:
             shape=(1,),
             dtype=action_dtype,
         )
-        self._action_buf = np.ndarray((1,), dtype=action_dtype)
+        self._action_buf = np.zeros((1,), dtype=action_dtype)
+        self.synced_action.write(self._action_buf)
 
         state_dtype = np.dtype(
             [
@@ -138,6 +159,10 @@ class BoosterRobotPortal:
                 ("joint_pos", float, (self.robot.num_joints,)),
                 ("joint_vel", float, (self.robot.num_joints,)),
                 ("feedback_torque", float, (self.robot.num_joints,)),
+                ("state_received", float),
+                ("recovery_valid_since", float),
+                ("recovery_fault_code", int),
+                ("recovery_fault_joint", int),
             ]
         )
         self.synced_state = SyncedArray(
@@ -146,6 +171,7 @@ class BoosterRobotPortal:
             dtype=state_dtype
         )
         self._state_buf = np.zeros((1,), dtype=state_dtype)
+        self.synced_state.write(self._state_buf)
 
         command_dtype = np.dtype(
             [
@@ -307,6 +333,24 @@ class BoosterRobotPortal:
             if not self.is_running or self.exit_event.is_set():
                 return
 
+            now = time.monotonic()
+            if self.cfg.booster.recovery_safety:
+                code, joint = feedback_fault(low_state_msg)
+                previous_received = float(self._state_buf[0]['state_received'])
+                valid_since = float(self._state_buf[0]['recovery_valid_since'])
+                self._state_buf[0]['recovery_fault_code'] = code
+                self._state_buf[0]['recovery_fault_joint'] = joint
+                self._state_buf[0]['state_received'] = now
+                self._state_buf[0]['recovery_valid_since'] = (0.0 if code else
+                    (valid_since if valid_since > 0 and
+                     now - previous_received <= self.cfg.booster.recovery_state_max_age else now))
+                if code:
+                    self.synced_state.write(self._state_buf)
+                    self.low_state_received_event.set()  # arrival is not a health assertion
+                    if self.recovery_active_event.is_set():
+                        self._recovery_guard()
+                    return
+
             # collect state data
             rpy = np.array(low_state_msg.imu_state.rpy, dtype=np.float32)
             gyro = np.array(low_state_msg.imu_state.gyro, dtype=np.float32)
@@ -330,6 +374,7 @@ class BoosterRobotPortal:
             self._state_buf[0]["joint_pos"][:] = dof_pos
             self._state_buf[0]["joint_vel"][:] = dof_vel
             self._state_buf[0]["feedback_torque"][:] = fb_torque
+            self._state_buf[0]['state_received'] = now
             self.synced_state.write(self._state_buf)
             self.low_state_received_event.set()
 
@@ -397,7 +442,14 @@ class BoosterRobotPortal:
             request.msg.body = json.dumps(body) if body is not None else ""
 
             future = self.rpc_service_client.call_async(request)
-            rclpy.spin_until_future_complete(self.publish_node, future)
+            if self.cfg.booster.recovery_safety:
+                rclpy.spin_until_future_complete(self.publish_node, future, timeout_sec=0.5)
+                if not future.done():
+                    future.cancel()
+                    self.logger.error('Recovery mode/status RPC timed out')
+                    return False, None
+            else:
+                rclpy.spin_until_future_complete(self.publish_node, future)
             result = future.result()
         except Exception as exc:
             self.logger.error("booster_rpc_service call failed: %s", exc)
@@ -440,7 +492,9 @@ class BoosterRobotPortal:
                 "expected 'damping', 'walking' (or 'walk'), or 'custom'"
             )
 
-        if not self.rpc_service_client.wait_for_service(timeout_sec=15.0):
+        if not self.rpc_service_client.wait_for_service(
+            timeout_sec=1.0 if self.cfg.booster.recovery_safety else 15.0
+        ):
             self.logger.error("booster_rpc_service is unavailable")
             return False
 
@@ -450,6 +504,8 @@ class BoosterRobotPortal:
             else normalized.capitalize()
         )
         for _ in range(20):
+            if self.cfg.booster.recovery_safety and normalized != 'damping' and self.exit_event.is_set():
+                return False
             ok, _ = self._call_booster_rpc(
                 _LOC_API_CHANGE_MODE,
                 {"mode": expected_mode},
@@ -469,6 +525,121 @@ class BoosterRobotPortal:
 
         self.logger.error("Failed to switch robot to %s mode", display_name)
         return False
+
+    def _recovery_abort(self, reason):
+        if not self.exit_event.is_set():
+            self.logger.error('K1 recovery interlock: %s; stopping and requesting Damping', reason)
+        self._safety_abort = True
+        self.exit_event.set()
+        return False
+
+    def _recovery_guard(self, *, before_start=False, state=None):
+        if self.exit_event.is_set():
+            return False
+        if state is None:
+            state = self.synced_state.read()[0]
+        reason = state_fault(state, time.monotonic(), self.cfg.booster.recovery_state_max_age,
+                             self.cfg.booster.recovery_ready_duration if before_start else 0.0)
+        return self._recovery_abort(reason) if reason else True
+
+    def _publish_recovery_target(self, target, kp, kd, trace=None):
+        """Single publisher owner: parent hold thread OR ready child, never both."""
+        state = self.synced_state.read()[0]
+        if not self._recovery_guard(state=state):
+            return False
+        kp, kd = np.asarray(kp, dtype=float), np.asarray(kd, dtype=float)
+        if kd.shape != (22,) or not np.isfinite(kd).all() or (kd < 0).any():
+            return self._recovery_abort('invalid command damping')
+        try:
+            target = limit_arm_targets(target, state['joint_pos'], kp, self.cfg.robot.effort_limit)
+        except ValueError as exc:
+            return self._recovery_abort(str(exc))
+        if self.exit_event.is_set():
+            return False
+        for i, motor in enumerate(self.motor_cmd):
+            motor.q, motor.kp, motor.kd = float(target[i]), float(kp[i]), float(kd[i])
+            motor.dq, motor.tau = 0.0, 0.0
+            if i < 2 and self.cfg.booster.control_head:
+                motor.weight = 1.0
+        with self._recovery_publish_lock:
+            if self.exit_event.is_set():
+                return False
+            self.low_cmd_publisher.publish(self.low_cmd)
+        self._action_buf[0]['dof_target'] = target
+        self._action_buf[0]['stiffness'] = kp
+        self._action_buf[0]['damping'] = kd
+        self._action_buf[0]['published_at'] = time.monotonic()
+        self.synced_action.write(self._action_buf)
+        if trace is not None:
+            trace.record_command(target, state, kp, kd)
+        return True
+
+    def _recovery_command_guard(self):
+        published = float(self.synced_action.read()[0]['published_at'])
+        if not 0 <= time.monotonic() - published <= self.cfg.booster.recovery_command_max_age:
+            return self._recovery_abort('command heartbeat stale')
+        return True
+
+    def _wait_recovery_ready(self, timeout=3.0):
+        """Wait for the startup observation window without publishing commands."""
+        deadline = time.monotonic() + timeout
+        announced = False
+        while not self.exit_event.is_set():
+            state = self.synced_state.read()[0]
+            now = time.monotonic()
+            # Only an incomplete healthy window is waitable. Faults and stale
+            # feedback still latch a stop immediately.
+            reason = state_fault(state, now, self.cfg.booster.recovery_state_max_age)
+            if reason:
+                return self._recovery_abort(reason)
+            elapsed = now - float(state['recovery_valid_since'])
+            required = self.cfg.booster.recovery_ready_duration
+            if elapsed >= required:
+                return True
+            if now >= deadline:
+                return self._recovery_abort(
+                    f'feedback readiness timed out after {timeout:.2f}s; '
+                    f'continuous valid feedback {elapsed:.3f}/{required:.2f}s')
+            if not announced:
+                self.logger.info(
+                    'Waiting for continuous valid feedback before Custom: %.3f/%.2fs',
+                    elapsed, required)
+                announced = True
+            self.exit_event.wait(timeout=0.02)
+        return False
+
+    def _start_recovery_hold(self):
+        if not self._recovery_guard(before_start=True):
+            return False
+        if self.low_cmd_publisher.get_subscription_count() == 0:
+            return self._recovery_abort('no joint_ctrl subscriber before Custom')
+        self._recovery_hold_target = self.synced_state.read()[0]['joint_pos'].copy()
+        self.recovery_active_event.set()
+        self._recovery_hold_stop.clear()
+
+        def publish_hold():
+            try:
+                gains = self.cfg.robot.prepare_state
+                while not self._recovery_hold_stop.is_set() and not self.exit_event.is_set():
+                    if not self._publish_recovery_target(self._recovery_hold_target,
+                                                         gains.stiffness, gains.damping):
+                        break
+                    self._recovery_hold_stop.wait(self.cfg.policy_dt)
+            except Exception as exc:
+                self._recovery_abort(f'hold publisher failed: {exc}')
+
+        self._recovery_hold_thread = threading.Thread(target=publish_hold, daemon=True)
+        self._recovery_hold_thread.start()
+        return True
+
+    def _stop_recovery_hold(self):
+        self._recovery_hold_stop.set()
+        thread = self._recovery_hold_thread
+        if thread is not None:
+            thread.join(timeout=0.5)
+            if thread.is_alive():
+                return self._recovery_abort('hold publisher did not stop; refusing policy handoff')
+        return True
 
     def _prime_custom_command(self) -> None:
         """Preload the PVT-style PD hold command before leaving PVT."""
@@ -504,6 +675,20 @@ class BoosterRobotPortal:
         if not self.low_state_received_event.is_set():
             self.logger.error("No valid '/low_state'; refusing Custom mode")
             return False
+
+        if self.cfg.booster.recovery_safety:
+            if not self._wait_recovery_ready():
+                return False
+            if not self._start_recovery_hold():
+                return False
+            # Keep publishing through RPC retries, waiting for A and model loading.
+            time.sleep(0.1)
+            if not self._change_robot_mode('custom') or self.exit_event.is_set():
+                self._stop_recovery_hold()
+                return False
+            self.logger.info('Custom mode started; publishing guarded hold at %.1f Hz',
+                             1.0 / self.cfg.policy_dt)
+            return True
 
         # Python-side walking preparation is allowed only from an upright
         # posture.  This is a single check at the X trigger; interpolation
@@ -641,12 +826,22 @@ class BoosterRobotPortal:
 
     def start_rl_gait_conditionally(self, wait_for_trigger: bool = True):
         """Start RL mode and spawn inference process and publisher thread."""
+        if self.cfg.booster.recovery_hold_only:
+            self.logger.info('RECOVERY HOLD ONLY: A/r disabled; Ctrl+C exits to Damping')
+            while not self.exit_event.is_set():
+                if not self._recovery_guard() or not self._recovery_command_guard():
+                    break
+                time.sleep(0.02)
+            return False
         if wait_for_trigger:
             print(f"{self.remoteControlService.get_rl_gait_operation_hint()}")
             while not self.exit_event.is_set():
+                if self.cfg.booster.recovery_safety:
+                    if not self._recovery_guard() or not self._recovery_command_guard():
+                        return False
                 if self.remoteControlService.start_rl_gait():
                     break
-                time.sleep(0.1)
+                time.sleep(0.02 if self.cfg.booster.recovery_safety else 0.1)
 
         if self.exit_event.is_set():
             return False
@@ -664,8 +859,27 @@ class BoosterRobotPortal:
             args=(process_cfg, self, prepare_then_task),
             daemon=True,
         )
-        self.inference_process.start()
+        if self.cfg.booster.recovery_safety:
+            if not self._recovery_publish_lock.acquire(timeout=self.cfg.booster.recovery_command_max_age):
+                return self._recovery_abort('hold publisher blocked; refusing inference startup')
+            try:
+                self.inference_process.start()
+            finally:
+                self._recovery_publish_lock.release()
+        else:
+            self.inference_process.start()
         self.logger.info("Inference process started")
+        if self.cfg.booster.recovery_safety:
+            deadline = time.monotonic() + 30.0
+            while not self.recovery_ready_event.wait(timeout=0.02):
+                if not self._recovery_guard() or not self._recovery_command_guard():
+                    return False
+                if not self.inference_process.is_alive() or time.monotonic() >= deadline:
+                    return self._recovery_abort('inference did not become ready')
+            if not self._stop_recovery_hold() or not self._recovery_guard():
+                return False
+            # Parent publisher exits before the child can publish its first target.
+            self.recovery_go_event.set()
 
         # In walking preparation the locomotion policy is command-free, so do
         # not advertise velocity controls until the task policy is enabled.
@@ -684,6 +898,7 @@ class BoosterRobotPortal:
         # stop threads and processes
         self.is_running = False
         self.exit_event.set()
+        self._stop_recovery_hold()
 
         # wait for inference process
         if (
@@ -765,6 +980,11 @@ class BoosterRobotPortal:
                     print(f"{self.remoteControlService.get_rl_gait_operation_hint()}")
             # main loop: wait for exit signal
             while self.is_running and not self.exit_event.is_set():
+                if self.cfg.booster.recovery_safety:
+                    if not self._recovery_guard():
+                        break
+                    if not self._recovery_command_guard():
+                        break
                 if (
                     prepare_mode == "walking"
                     and not self.cfg.booster.head_only
@@ -784,8 +1004,9 @@ class BoosterRobotPortal:
                         self.is_running = False
                         self.exit_event.set()
                         break
-                time.sleep(0.1)
+                time.sleep(0.02 if self.cfg.booster.recovery_safety else 0.1)
 
+        self._stop_recovery_hold()
         exit_mode = "damping" if self._safety_abort else self.cfg.booster.exit_mode.strip().lower()
         exit_mode_display = "Walking" if exit_mode == "walk" else exit_mode.capitalize()
         self.logger.info(
@@ -814,6 +1035,13 @@ class BoosterRobotPortal:
         prepare_then_task: bool = False,
     ) -> None:
         controller = BoosterRobotController(cfg, portal)
+        if cfg.booster.recovery_safety:
+            portal.recovery_ready_event.set()
+            while not portal.recovery_go_event.wait(timeout=0.02):
+                if portal.exit_event.is_set():
+                    return
+            if not portal._recovery_guard():
+                return
         controller.run(stop_event=portal.task_start_event if prepare_then_task else None)
         if prepare_then_task and not portal.exit_event.is_set():
             from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
@@ -887,6 +1115,9 @@ class BoosterRobotController(BaseController):
 
     def update_state(self) -> None:
         state = self.portal.synced_state.read()[0]
+        if self.cfg.booster.recovery_safety and not self.portal._recovery_guard(state=state):
+            self.stop()
+            raise RuntimeError('Recovery feedback interlock rejected state before inference')
 
         self.robot.data.joint_pos = torch.from_numpy(
             state["joint_pos"]).to(dtype=torch.float32).to(
@@ -916,6 +1147,11 @@ class BoosterRobotController(BaseController):
                 self.robot.data.device)
 
     def ctrl_step(self, dof_targets: torch.Tensor) -> None:
+        if self.cfg.booster.recovery_safety:
+            self.portal._publish_recovery_target(
+                dof_targets.detach().cpu().numpy(), self.cfg.robot.joint_stiffness,
+                self.cfg.robot.joint_damping, getattr(self.policy, 'trace', None))
+            return
         tracker = getattr(self.portal, "head_tracker", None)
         if tracker is not None:
             now = time.monotonic()

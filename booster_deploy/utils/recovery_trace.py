@@ -62,9 +62,21 @@ class RecoveryTrace:
             'trajectory_q': _values(trajectory) if trajectory is not None else None,
             'residual': _values(policy.last_action),
             'target_proposed': _values(target),
+            'target_before_arm_limit': _values(policy.target_before_arm_limit),
             'pd_estimate': _values(kp * (target - q) - kd * dq),
             'observation': (_values(policy.last_observation)
                             if policy.last_observation is not None else None),
+        })
+
+    def record_command(self, target, state, kp, kd):
+        q, dq = state['joint_pos'], state['joint_vel']
+        self.write({
+            'type': 'command', 'wall_time': time.time(),
+            'state_age': time.monotonic() - float(state['state_received']),
+            'q': q.tolist(), 'dq': dq.tolist(), 'target_published': target.tolist(),
+            'kp': list(kp), 'kd': list(kd),
+            'pd_estimate': (kp * (target - q) - kd * dq).tolist(),
+            'note': 'ROS publish returned; motor acceptance is not confirmed.',
         })
 
     def close(self):
@@ -76,6 +88,9 @@ def summarize_trace(path):
     metadata = None
     stats = []
     count = 0
+    command_count = 0
+    arm_p_max = [0.0] * 8
+    arm_limit_violations = 0
     final_state = None
     with Path(path).open(encoding='utf-8') as source:
         for number, line in enumerate(source, 1):
@@ -90,6 +105,16 @@ def summarize_trace(path):
                               max_abs_feedback_torque=0., max_abs_pd_estimate=0.,
                               estimated_over_limit_frames=0)
                          for i, name in enumerate(frame['joint_names'])]
+                continue
+            if frame['type'] == 'command':
+                if metadata is None:
+                    raise ValueError('Trace is missing metadata')
+                command_count += 1
+                for i in range(2, 10):
+                    p_term = abs(frame['kp'][i] * (frame['target_published'][i] - frame['q'][i]))
+                    arm_p_max[i - 2] = max(arm_p_max[i - 2], p_term)
+                    if p_term > metadata['effort_limit'][i] + 1e-4:
+                        arm_limit_violations += 1
                 continue
             if frame['type'] != 'step':
                 continue
@@ -113,6 +138,9 @@ def summarize_trace(path):
     if metadata is None:
         raise ValueError('Trace is missing metadata')
     return {'executing_frames': count, 'final_state': final_state,
+            'published_command_frames': command_count,
+            'published_arm_max_abs_p_term': arm_p_max,
+            'published_arm_limit_violations': arm_limit_violations,
             'note': 'PD estimate exceeding the configured simulation limit does '
                     'not prove measured hardware over-torque or a stall.',
             'joints': sorted(stats, key=lambda item: item['max_error'], reverse=True)}

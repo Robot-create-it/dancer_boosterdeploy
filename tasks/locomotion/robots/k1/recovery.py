@@ -18,7 +18,7 @@ _ROBOT = K1WalkControllerCfg().robot
 @configclass
 class K1RecoveryTaskCfg(ControllerCfg):
     policy_dt = _RECOVERY["fdr_control_dt"]
-    booster = BoosterRobotControllerCfg(exit_mode="damping", control_head=True)
+    booster = BoosterRobotControllerCfg(exit_mode="damping", control_head=True, recovery_safety=True)
     mujoco = MujocoControllerCfg(
         init_pos=[0.0, 0.0, 0.25],
         init_quat=[math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],

@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Event
 from types import ModuleType, SimpleNamespace
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -89,8 +90,11 @@ def make_portal(cfg):
                         for _ in portal.robot.cfg.joint_names]
     portal.low_cmd = SimpleNamespace(motor_cmd=portal.motor_cmd)
     portal.low_cmd_publisher = Mock()
+    portal.low_cmd_publisher.get_subscription_count.return_value = 1
     state = portal.synced_state.read()
     state[0]['joint_pos'] = cfg.robot.default_joint_pos
+    state[0]['state_received'] = time.monotonic()
+    state[0]['recovery_valid_since'] = time.monotonic() - 1.0
     portal.synced_state.write(state)
     return portal
 
@@ -326,6 +330,8 @@ class RecoveryRobotTests(unittest.TestCase):
         message = SimpleNamespace(
             imu_state=SimpleNamespace(rpy=[0.1, -1.4, 0.2], gyro=gyro),
             motor_state_serial=[SimpleNamespace(q=a, dq=b, tau_est=0.) for a, b in zip(q, dq)],
+            motor_state_parallel=[SimpleNamespace(q=a, dq=b, tau_est=0., temperature=40)
+                                  for a, b in zip(q, dq)],
         )
         portal._low_state_handler(message)
         controller.update_state()
@@ -356,10 +362,13 @@ class RecoveryRobotTests(unittest.TestCase):
         portal.low_cmd_publisher.get_subscription_count.return_value = 1
         with patch.object(portal, '_change_robot_mode', return_value=True) as mode, \
                 patch.object(ROBOT.time, 'sleep'), patch.object(ROBOT.np, 'linspace') as interpolate:
-            self.assertTrue(portal.start_custom_mode_conditionally())
+            try:
+                self.assertTrue(portal.start_custom_mode_conditionally())
+            finally:
+                portal._stop_recovery_hold()
         mode.assert_called_once_with('custom')
         interpolate.assert_not_called()
-        portal.low_cmd_publisher.publish.assert_called_once()
+        self.assertGreaterEqual(portal.low_cmd_publisher.publish.call_count, 1)
         np.testing.assert_allclose([m.q for m in portal.motor_cmd], state[0]['joint_pos'])
         self.assertEqual([m.weight for m in portal.motor_cmd[:2]], [1., 1.])
 

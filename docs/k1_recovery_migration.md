@@ -77,6 +77,11 @@ demo C++ 的 perception 接口使用度，需要乘 π/180；本仓库 loco 的�
 - kp/kd、reference、限位和 effort_limit 来自 recovery 配置。
   与 loco 相同，硬件路径发送 q/kp/kd，dq/tau 为零；`effort_limit` 用于 MuJoCo PD 力矩裁剪，
   当前 LowCmd 路径不下发新的固件力矩上限。
+  2026-09-28进一步核对本机固件，确认原生FDR还对手臂目标执行
+  `q_measured ± torque_limit/kp`位置误差裁剪。当前已在recovery策略输出及实机发布前补齐，
+  索引2～9限幅，上一动作观测仍使用模型原始残差。仿真和实机策略都应用此约束。
+  该约束限制比例项，不是总PD力矩/驱动电流硬上限；实机发布端运行在50Hz。
+  定位过程见[k1_recovery_execution_gap_20260928.md](k1_recovery_execution_gap_20260928.md)。
 
 ## 生命周期
 
@@ -86,6 +91,13 @@ demo C++ 的 perception 接口使用度，需要乘 π/180；本仓库 loco 的�
 与 demo 仿真内部无限重试不同，仿真配置默认最多重试两次。
 2026-09-27 实机发现堵转后，`scripts/deploy.py` 的实机 recovery 入口将重试次数设为 0，
 首次恢复超时即停止控制器，避免带故障重复起身；这不等于已实现堵转即时中止。
+现已增加recovery专用反馈联锁：Custom前要求连续0.5s有效反馈；检查22个serial/parallel
+关节和IMU的形状/有限性，识别臂关节双通道q/dq/tau与parallel温度全零；
+反馈超过0.1s、命令心跳超过0.2s或检测到上述故障时停止发布并请求Damping。
+这不能预判堵转，不能检出所有驱动故障或间歇CAN问题，也不依赖reserve=0判断健康。
+父进程在Custom切换、等待A、模型加载期间以50Hz目标频率保持初始实测姿态；
+子进程就绪后，父进程停止保持线程，再允许子进程发送策略命令。
+新增`--recovery-hold-only`仅保持，不加载模型、不响应A起身；使用ROS bag记录此阶段。
 任务默认退出模式为 damping。外部管理器可读取 policy 的 `state` / `retries`，
 在新会话调用 `reset()`，但本次未把自动恢复加入 loco。
 
@@ -106,6 +118,7 @@ python -m unittest discover -s tests -v
 使用通用 `MujocoController` 完成闭环起身：仰卧 259 个控制周期（5.18 s），
 俯卧 294 个周期（5.88 s），均零重试，结束时根节点高度约 0.55 m。
 对应自动测试为 `test_k1_recovery_sim.py`。这些结果不替代实机起身验证；本次未操作实机。
+增加手臂限幅后，faceup和facedown两项MuJoCo测试再次实际通过，均零重试。
 
 后续实机失败记录见 `k1_recovery_hardware_diagnosis_20260927.md`，
 继续调试前按 `k1_recovery_debugging.md` 完成输出和故障通道核实。

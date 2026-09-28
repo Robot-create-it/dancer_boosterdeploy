@@ -16,6 +16,8 @@ parser.add_argument("--recovery-posture", choices=("faceup", "facedown"),
                     help="k1_recovery --mujoco: initial lying posture (default: facedown)")
 parser.add_argument("--recovery-log", metavar="JSONL",
                     help="k1_recovery: record each policy proposal and measured state; file must be new")
+parser.add_argument("--recovery-hold-only", action="store_true",
+                    help="k1_recovery hardware: X starts guarded pose hold; A/r never starts getup")
 parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
                     help="k1_pass/k1_shoot --mujoco: initial ball centre in world XY (metres)")
 parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
@@ -42,6 +44,12 @@ args = parser.parse_args()
 
 
 def main():
+    if args.recovery_hold_only and (args.task != "k1_recovery" or args.mujoco):
+        parser.error('--recovery-hold-only requires hardware --task k1_recovery')
+    if args.recovery_hold_only and args.recovery_log is not None:
+        parser.error('--recovery-hold-only does not run a policy; record /low_state and /joint_ctrl with ros2 bag')
+    if args.task == 'k1_recovery' and not args.mujoco and args.exit_mode not in (None, 'damping'):
+        parser.error('Hardware recovery must exit to damping')
     if args.recovery_log is not None and args.task != "k1_recovery":
         parser.error("--recovery-log requires --task k1_recovery")
     if args.recovery_posture is not None and (args.task != "k1_recovery" or not args.mujoco):
@@ -89,6 +97,7 @@ def main():
 
     # Set device for policy
     if args.task == "k1_recovery":
+        task_cfg.booster.recovery_hold_only = args.recovery_hold_only
         task_cfg.policy.trace_path = args.recovery_log
         if not args.mujoco:
             # Hardware faults are not reliably represented by ROS reserve[0]
