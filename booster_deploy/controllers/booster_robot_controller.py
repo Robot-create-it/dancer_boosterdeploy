@@ -37,7 +37,7 @@ from ..utils.isaaclab import math as lab_math
 from ..utils.remote_control_service import RemoteControlService
 from ..utils.vision_ball import BallObservation, select_ball_observation
 from ..utils.head_ball_tracker import HeadBallTracker
-from ..utils.recovery_safety import feedback_fault, limit_arm_targets, state_fault
+from ..utils.recovery_safety import feedback_fault, state_fault
 
 
 logger = logging.getLogger("booster_deploy")
@@ -547,13 +547,15 @@ class BoosterRobotPortal:
         state = self.synced_state.read()[0]
         if not self._recovery_guard(state=state):
             return False
-        kp, kd = np.asarray(kp, dtype=float), np.asarray(kd, dtype=float)
-        if kd.shape != (22,) or not np.isfinite(kd).all() or (kd < 0).any():
-            return self._recovery_abort('invalid command damping')
         try:
-            target = limit_arm_targets(target, state['joint_pos'], kp, self.cfg.robot.effort_limit)
-        except ValueError as exc:
-            return self._recovery_abort(str(exc))
+            target, kp, kd = (np.asarray(values, dtype=float) for values in (target, kp, kd))
+        except (TypeError, ValueError) as exc:
+            return self._recovery_abort(f'invalid recovery command: {exc}')
+        if any(values.shape != (22,) or not np.isfinite(values).all()
+               for values in (target, kp, kd)):
+            return self._recovery_abort('recovery target and gains must be 22 finite values')
+        if (kp[2:10] <= 0).any() or (kd < 0).any():
+            return self._recovery_abort('invalid recovery stiffness or damping')
         if self.exit_event.is_set():
             return False
         for i, motor in enumerate(self.motor_cmd):

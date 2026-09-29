@@ -23,8 +23,9 @@ python scripts/check_k1_recovery_state.py --output logs/recovery_state_after_res
 现有 Python 仿真手臂力矩会裁剪到配置的 14 Nm，硬件路径不下发这个上限。
 不能假定二者等价，也不能把 50 Hz 调整目标角的近似限幅当作底层硬限流。
 故障联锁需使用本机有效信号，不能只读上次始终为零的 reserve[0]。
-当前已补齐手臂`q_measured ± torque_limit/kp`限幅、连续保持和反馈联锁，
-但未改变驱动保护阈值，也未完成实机验收。验证步骤见[k1_recovery_hardware_validation.md](k1_recovery_hardware_validation.md)。
+当前代码保留连续保持和反馈联锁，已按用户要求移除手臂
+`q_measured ± torque_limit/kp`目标角限幅；驱动保护阈值未改变，
+移除后的实机验收尚未完成。验证步骤见[k1_recovery_hardware_validation.md](k1_recovery_hardware_validation.md)。
 
 ## 2. 先验证记录功能，再进行有支撑的单次测试
 
@@ -69,15 +70,16 @@ python scripts/analyze_k1_recovery.py logs/recovery_real_trial01.jsonl
 
 日志每个策略周期记录：实测 q/dq/tau、gravity/gyro、轨迹行与 phase、
 100 维观测、轨迹 q、模型 residual、拟发送目标、PD 力矩估计和状态。
-`target_before_arm_limit`保存约束前候选，`target_proposed`保存约束后的策略输出。
+`target_proposed`保存策略输出（已施加绝对关节角边界，未施加相对实测角的手臂限幅）。
 实机增加`type=command`记录，保存发布前最新q/dq、最终`target_published`和state_age。
-分析器的`published_command_frames`应大于0、`published_arm_limit_violations`应为0。
-没有command帧时，不能用违规数0作为发布端限幅已经验证的依据。
+分析器的`published_command_frames`应大于0；
+`published_arm_p_over_nominal_joint_samples`统计已发布比例项超过原14Nm名义值的关节采样数。
+没有command帧时，该统计为0不能说明目标角安全或已执行。
 首行包含实际控制器名称、增益、限位、模型 SHA-256 与配置的 effort_limit。
 文件逐行刷新，已有文件拒绝覆盖。
 
 `target_proposed` 是策略产物，不是电机接收确认；
-`pd_estimate=kp*(target-q)-kd*dq` 是未限幅的计算值，不是实测力矩。
+`pd_estimate=kp*(target-q)-kd*dq` 是计算值，不是实测力矩或底层硬限流。
 分析输出的 estimated_over_limit_frames 只表示该估计超过仿真配置阈值，
 不能单独证明实机超力矩或堵转。
 

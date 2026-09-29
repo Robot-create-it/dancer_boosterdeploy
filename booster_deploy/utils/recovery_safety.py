@@ -1,4 +1,4 @@
-"""K1 recovery checks and native-FDR arm position-error constraint.
+"""K1 recovery feedback and state checks.
 
 These checks are not a motor current limiter or a complete firmware fault decoder.
 """
@@ -30,21 +30,6 @@ def feedback_fault(message):
         if 2 <= i < 10 and all(v == 0 for v in values):
             return 3, i
     return 0, -1
-
-
-def limit_arm_targets(target, measured, kp, effort):
-    """Bound the arm P term as native FDR does; do not alter other joints."""
-    target, measured, kp, effort = [np.asarray(v, dtype=np.float64)
-                                   for v in (target, measured, kp, effort)]
-    if any(v.shape != (22,) or not np.isfinite(v).all()
-           for v in (target, measured, kp, effort)):
-        raise ValueError('Recovery targets, feedback, gains and limits must be 22 finite values')
-    if (kp[2:10] <= 0).any() or (effort[2:10] <= 0).any():
-        raise ValueError('Recovery arm kp and effort limits must be positive')
-    result = target.copy()
-    width = effort[2:10] / kp[2:10]
-    result[2:10] = np.clip(target[2:10], measured[2:10] - width, measured[2:10] + width)
-    return result
 
 
 def state_fault(state, now, max_age, ready_duration=0.0):

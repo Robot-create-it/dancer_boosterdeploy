@@ -13,7 +13,6 @@ import torch
 
 from booster_deploy.controllers.base_controller import BaseController
 from booster_deploy.utils.isaaclab import math as lab_math
-from booster_deploy.utils.recovery_safety import limit_arm_targets
 from tasks.locomotion.robots.k1.loco import K1LocoTaskCfg
 from tasks.locomotion.robots.k1.recovery import K1RecoveryTaskCfg
 
@@ -108,8 +107,6 @@ class RecoveryTests(unittest.TestCase):
             residual = torch.linspace(-4, 4, 22)
             residual[p.zero_joint_ids] = 0
             expected = (p.trajectories['faceup']['joint'][1] + residual).clamp(p.q_min, p.q_max)
-            expected = torch.tensor(limit_arm_targets(expected, c.robot.data.joint_pos,
-                                    c.robot.joint_stiffness, c.robot.effort_limit), dtype=expected.dtype)
             torch.testing.assert_close(target, expected)
             c.policy_step()
             torch.testing.assert_close(p.last_observation[78:], residual)
@@ -151,7 +148,6 @@ class RecoveryTests(unittest.TestCase):
                 raw = runner.session.run([runner.output_name], {runner.input_name: expected[None]})[0].reshape(-1)
                 raw[p.cfg.zero_joint_ids] = 0
                 fused = np.clip(traj['joint'][row].numpy() + raw, p.q_min.numpy(), p.q_max.numpy())
-                fused = limit_arm_targets(fused, q, c.robot.joint_stiffness, c.robot.effort_limit)
                 np.testing.assert_allclose(target.numpy(), fused, atol=2e-5)
                 previous = raw.copy()
 

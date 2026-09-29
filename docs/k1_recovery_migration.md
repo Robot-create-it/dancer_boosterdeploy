@@ -78,9 +78,10 @@ demo C++ 的 perception 接口使用度，需要乘 π/180；本仓库 loco 的�
   与 loco 相同，硬件路径发送 q/kp/kd，dq/tau 为零；`effort_limit` 用于 MuJoCo PD 力矩裁剪，
   当前 LowCmd 路径不下发新的固件力矩上限。
   2026-09-28进一步核对本机固件，确认原生FDR还对手臂目标执行
-  `q_measured ± torque_limit/kp`位置误差裁剪。当前已在recovery策略输出及实机发布前补齐，
-  索引2～9限幅，上一动作观测仍使用模型原始残差。仿真和实机策略都应用此约束。
-  该约束限制比例项，不是总PD力矩/驱动电流硬上限；实机发布端运行在50Hz。
+  `q_measured ± torque_limit/kp`位置误差裁剪。该约束曾在recovery策略输出及
+  实机发布前各执行一次；2026-09-29按用户要求从deploy中移除。
+  原生固件仍保留该约束；它限制比例项，不是总PD力矩/驱动电流硬上限。
+  实机发布端运行在50Hz。
   定位过程见[k1_recovery_execution_gap_20260928.md](k1_recovery_execution_gap_20260928.md)。
 
 ## 生命周期

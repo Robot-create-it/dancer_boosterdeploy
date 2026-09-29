@@ -20,12 +20,13 @@ class RecoveryTrace:
         self.step = 0
         robot = policy.robot
         self.write({
-            'type': 'metadata', 'schema': 1,
+            'type': 'metadata', 'schema': 2,
             'controller': type(policy.controller).__name__,
             'joint_names': robot.cfg.joint_names,
             'kp': _values(robot.joint_stiffness),
             'kd': _values(robot.joint_damping),
             'effort_limit': _values(robot.effort_limit),
+            'arm_position_error_limit_enabled': False,
             'policy_dt': policy.cfg.control_dt,
             'max_retries': policy.cfg.max_retries,
             'model': policy.cfg.checkpoint_path,
@@ -33,9 +34,11 @@ class RecoveryTrace:
                 (Path(policy.task_path) / policy.cfg.checkpoint_path).read_bytes()
             ).hexdigest(),
             'q_min': _values(policy.q_min), 'q_max': _values(policy.q_max),
-            'note': 'Targets are policy proposals, not proof of publication or '
-                    'motor acceptance. pd_estimate is not measured torque or '
-                    'a hardware torque limiter. ROS zero fault fields may be invalid.',
+            'note': 'Arm position-error clipping is disabled; effort_limit is a '
+                    'nominal comparison threshold, not a motor-side torque '
+                    'limiter in Custom mode. '
+                    'Targets are not proof of motor acceptance; pd_estimate is '
+                    'not measured torque. ROS zero fault fields may be invalid.',
         })
 
     def write(self, row):
@@ -62,7 +65,6 @@ class RecoveryTrace:
             'trajectory_q': _values(trajectory) if trajectory is not None else None,
             'residual': _values(policy.last_action),
             'target_proposed': _values(target),
-            'target_before_arm_limit': _values(policy.target_before_arm_limit),
             'pd_estimate': _values(kp * (target - q) - kd * dq),
             'observation': (_values(policy.last_observation)
                             if policy.last_observation is not None else None),
@@ -90,7 +92,7 @@ def summarize_trace(path):
     count = 0
     command_count = 0
     arm_p_max = [0.0] * 8
-    arm_limit_violations = 0
+    arm_p_over_nominal = 0
     final_state = None
     with Path(path).open(encoding='utf-8') as source:
         for number, line in enumerate(source, 1):
@@ -114,7 +116,7 @@ def summarize_trace(path):
                     p_term = abs(frame['kp'][i] * (frame['target_published'][i] - frame['q'][i]))
                     arm_p_max[i - 2] = max(arm_p_max[i - 2], p_term)
                     if p_term > metadata['effort_limit'][i] + 1e-4:
-                        arm_limit_violations += 1
+                        arm_p_over_nominal += 1
                 continue
             if frame['type'] != 'step':
                 continue
@@ -137,10 +139,15 @@ def summarize_trace(path):
                     stat['estimated_over_limit_frames'] += 1
     if metadata is None:
         raise ValueError('Trace is missing metadata')
+    arm_limit_enabled = metadata.get('arm_position_error_limit_enabled')
+    if arm_limit_enabled is None and metadata.get('schema') == 1:
+        arm_limit_enabled = True
     return {'executing_frames': count, 'final_state': final_state,
             'published_command_frames': command_count,
             'published_arm_max_abs_p_term': arm_p_max,
-            'published_arm_limit_violations': arm_limit_violations,
-            'note': 'PD estimate exceeding the configured simulation limit does '
-                    'not prove measured hardware over-torque or a stall.',
+            'published_arm_p_over_nominal_joint_samples': arm_p_over_nominal,
+            'arm_position_error_limit_enabled': arm_limit_enabled,
+            'note': 'P term above the nominal effort limit or PD estimate above '
+                    'the simulation limit does not prove measured hardware '
+                    'over-torque or a stall.',
             'joints': sorted(stats, key=lambda item: item['max_error'], reverse=True)}

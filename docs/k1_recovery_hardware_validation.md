@@ -1,8 +1,10 @@
-# Recovery 修复后的实机验证
+# Recovery 当前代码的实机验证
 
 本次修改没有操作实机。先按厂家流程解除2/6/9等电机故障，并核查已有CAN读取失败。
 软件不自动清故障、重新使能电机或关闭驱动保护。空故障字段不是健康证明。
-50Hz目标角约束限制手臂比例项，不是驱动器硬限流，也不能保证首次堵转不会发生。
+当前代码已按用户要求移除手臂 `q_measured ±14/Kp` 目标角限制；
+`effort_limit=14` 仍用于仿真和离线诊断，不会限制实机发布的手臂目标角。
+首次堵转之前可能出现超过14Nm的请求比例项；固件驱动器是否接受由底层决定。
 
 ## 1. 只读确认
 
@@ -98,9 +100,9 @@ python scripts/check_k1_recovery_state.py --seconds 3 --output logs/recovery_fix
 检查：
 
 - 完整起身、无重试、固件无新增locked-rotor/读取失败；2/5/6/9无掉零。
-- `published_command_frames > 0`，`published_arm_limit_violations = 0`。
-- `published_arm_max_abs_p_term`对应关节2～9，每项不超过14Nm（允许1e-4数值误差）。
-  它是按发布时测量值计算的比例项，不是实际电机力矩；总PD估计可能因阻尼项超过14。
+- `published_command_frames > 0`；查看`published_arm_p_over_nominal_joint_samples`
+  和关节2～9的`published_arm_max_abs_p_term`，记录超过原14Nm名义值的次数与最大值。
+  它们按发布时测量值计算，不是实际电机力矩，也不是驱动器接收确认。
 - 最终bag同时含low_state和joint_ctrl，并覆盖开始接管至动作退出。
 
 静态保持通过不能代替承重起身验收；本次离线/仿真通过也不代表实机已经修复完成。

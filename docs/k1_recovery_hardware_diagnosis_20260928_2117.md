@@ -99,6 +99,10 @@
 不直接给模型套loco缩放，也不未经验证延长阶段/提高力矩。
 定量证据保存于`logs/recovery_2117_phase_tracking.json`。
 
+后续更新：用户确认仿真/实机代码版本一致，排除上述版本差异假设。
+继续排查发现Custom固件对肘部目标有更窄的软件角度限位，且本轮row35–50实际命令越界，
+详见[k1_recovery_custom_elbow_limits.md](k1_recovery_custom_elbow_limits.md)。
+
 ## 证据
 
 - 原始策略日志：`logs/recovery_fixed_20260928_211749.jsonl`

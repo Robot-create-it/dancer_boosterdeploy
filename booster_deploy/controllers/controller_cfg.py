@@ -77,7 +77,7 @@ class BoosterRobotControllerCfg:
     head_tracking: HeadTrackingCfg = HeadTrackingCfg()
     head_only: bool = False  # keep the zero-command preparation policy running
     control_head: bool = False  # task supplies head targets; send weight=1
-    recovery_safety: bool = False  # K1-specific serial/parallel checks and arm constraint
+    recovery_safety: bool = False  # K1-specific feedback and command checks
     recovery_hold_only: bool = False  # validation: A/r cannot start the policy
     recovery_state_max_age: float = 0.1
     recovery_ready_duration: float = 0.5

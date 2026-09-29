@@ -16,7 +16,6 @@ from booster_deploy.robots.k1 import K1_CFG
 from booster_deploy.utils.isaaclab.configclass import configclass
 from booster_deploy.utils.policy_runner import create_policy_runner
 from booster_deploy.utils.proprioception import read_proprioception
-from booster_deploy.utils.recovery_safety import limit_arm_targets
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +79,6 @@ class K1RecoveryPolicy(Policy):
         self.last_action.zero_()
         self.last_observation = None
         self._last_target = None
-        self.target_before_arm_limit = None
 
     def compute_observation(self):
         if self.posture is None:
@@ -106,11 +104,6 @@ class K1RecoveryPolicy(Policy):
     def inference(self):
         try:
             target = self._inference()
-            self.target_before_arm_limit = target.clone()
-            target = torch.as_tensor(limit_arm_targets(
-                target.detach().cpu().numpy(), self.robot.data.joint_pos.detach().cpu().numpy(),
-                self.robot.joint_stiffness.cpu().numpy(), self.robot.effort_limit.cpu().numpy(),
-            ), dtype=target.dtype, device=target.device)
             if self.trace is not None:
                 self.trace.record(self, target)
             return target

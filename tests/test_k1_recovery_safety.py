@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from booster_deploy.utils.recovery_safety import feedback_fault, limit_arm_targets
+from booster_deploy.utils.recovery_safety import feedback_fault
 from booster_deploy.utils.recovery_trace import RecoveryTrace, summarize_trace
 from tasks.locomotion.robots.k1.recovery import K1RecoveryTaskCfg
 from tests.test_k1_loco_robot import ROBOT, make_portal
@@ -31,17 +31,6 @@ class RecoverySafetyTests(unittest.TestCase):
     def tearDown(self):
         self.portal.exit_event.set()
         self.portal._stop_recovery_hold()
-
-    def test_native_arm_bound_preserves_other_joints(self):
-        cfg = self.portal.cfg.robot
-        q = np.zeros(22)
-        target = np.linspace(-1, 1, 22)
-        actual = limit_arm_targets(target, q, cfg.joint_stiffness, cfg.effort_limit)
-        p_term = np.abs(actual[2:10] * np.array(cfg.joint_stiffness)[2:10])
-        self.assertTrue((p_term <= 14.00001).all())
-        np.testing.assert_equal(actual[:2], target[:2])
-        np.testing.assert_equal(actual[10:], target[10:])
-        self.assertRaises(ValueError, limit_arm_targets, target, q, np.zeros(22), cfg.effort_limit)
 
     def test_fault_detector_requires_both_feedback_paths(self):
         msg = sample()
@@ -187,17 +176,25 @@ class RecoverySafetyTests(unittest.TestCase):
             self.assertFalse(p._publish_recovery_target(np.zeros(22), [53]*22, [2.5]*22))
         p.low_cmd_publisher.publish.assert_not_called()
 
-    def test_publish_uses_latest_feedback_and_records_limited_command(self):
+    def test_publish_keeps_policy_target_without_arm_error_clip(self):
         p = self.portal
         state = p.synced_state.read()
         state[0]['joint_pos'][:] = 0.1
         p.synced_state.write(state)
+        target = state[0]['joint_pos'].copy()
+        target[[2, 5, 6, 9]] = [-1., -1., -1., 1.]
         trace = Mock()
-        self.assertTrue(p._publish_recovery_target(np.ones(22), [53]*22, [2.5]*22, trace))
-        for i in range(2, 10):
-            self.assertAlmostEqual(p.motor_cmd[i].q, .1 + 14/53)
+        self.assertTrue(p._publish_recovery_target(target, [53]*22, [2.5]*22, trace))
+        np.testing.assert_allclose([motor.q for motor in p.motor_cmd], target)
         self.assertGreater(p.synced_action.read()[0]['published_at'], 0)
         trace.record_command.assert_called_once()
+        np.testing.assert_allclose(trace.record_command.call_args.args[0], target)
+
+    def test_nonfinite_recovery_target_is_rejected_before_publish(self):
+        target = np.zeros(22)
+        target[2] = float('nan')
+        self.assertFalse(self.portal._publish_recovery_target(target, [53]*22, [2.5]*22))
+        self.portal.low_cmd_publisher.publish.assert_not_called()
 
     def test_hold_keeps_publishing_frozen_pose_while_feedback_changes(self):
         p = self.portal
@@ -314,7 +311,7 @@ class RecoverySafetyTests(unittest.TestCase):
         self.assertEqual(spin.call_args.kwargs['timeout_sec'], .5)
         future.cancel.assert_called_once()
 
-    def test_command_trace_checks_proportional_limit_separately_from_damping(self):
+    def test_command_trace_reports_proportional_demand_above_nominal_limit(self):
         p = self.portal
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'trace.jsonl'
@@ -324,11 +321,14 @@ class RecoverySafetyTests(unittest.TestCase):
             try:
                 trace.write({'type':'metadata', 'joint_names':p.cfg.robot.joint_names,
                              'effort_limit':p.cfg.robot.effort_limit})
-                self.assertTrue(p._publish_recovery_target(np.ones(22), [53]*22, [2.5]*22, trace))
+                target = p.synced_state.read()[0]['joint_pos'].copy()
+                target[[2, 5, 6, 9]] = [-1., -1., -1., 1.]
+                self.assertTrue(p._publish_recovery_target(target, [53]*22, [2.5]*22, trace))
                 result = summarize_trace(path)
                 self.assertEqual(result['published_command_frames'], 1)
-                self.assertEqual(result['published_arm_limit_violations'], 0)
-                np.testing.assert_allclose(result['published_arm_max_abs_p_term'], 14.)
+                self.assertEqual(result['published_arm_p_over_nominal_joint_samples'], 4)
+                np.testing.assert_allclose(result['published_arm_max_abs_p_term'],
+                                           [53., 0., 0., 53., 53., 0., 0., 53.])
             finally:
                 trace.close()
 
