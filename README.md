@@ -46,7 +46,7 @@ python scripts/deploy.py --task k1_pass --mujoco --ball-pos 0.5 0.2
 `python scripts/start_k1_pass.py --vision-config /opt/booster`。
 入口负责启动或复用视觉、检查相机及 `/head_pose`，再进入 deploy。
 头部在准备阶段开始找球/跟球，并通过现有 `/joint_ctrl` 合入。
-先用 `--vision-only` 检查球坐标，再用 `--head-only` 验证头部与零速度 loco，最后启用 pass。
+先用 `--vision-only` 检查球坐标，再用 `--head-only` 在身体保持默认站姿时验证头部，最后启用 pass。
 完整操作和验证步骤见 [相机与头部测试指南](docs/k1_pass_camera_head_testing.md)。
 通过 SSH 在电脑浏览器看实时识别画面：转发 `8080:127.0.0.1:8080`，
 在机器人运行 `/usr/bin/python3 scripts/view_vision.py`，电脑打开 `http://127.0.0.1:8080`。
@@ -85,7 +85,7 @@ python scripts/start_k1_student.py --head-only --vision-config /opt/booster
 python scripts/start_k1_student.py --vision-config /opt/booster
 ```
 
-球输入沿用 pass/shoot 的获取路径：仿真只在球进入当前头部相机视野时读取机器人坐标系下的 MuJoCo 球位姿，实机读取新鲜的 `position_projection`；丢球时 student 当前帧的球输入为零。目标方向与 pass/shoot 相同，取机器人坐标系下机器人到球的连线方向 `atan2(ball_y, ball_x)`；目标点取该方向上距机器人 6 米的位置，并乘以训练时的目标缩放 `0.2`。丢球后方向沿用最近一次有效球位置。仓库没有比赛端的场地定位输入，因此该目标点并非定位得到的对方球门中心。首次见球前保持当前关节姿态。无窗口检查：`python -m unittest tests.test_k1_student tests.test_k1_student_sim`。
+球输入沿用 pass/shoot 的获取路径：仿真只在球进入当前头部相机视野时读取机器人坐标系下的 MuJoCo 球位姿，实机读取新鲜的 `position_projection`；获得过有效球后，丢球时 student 当前帧的球输入沿用最近一次有效原始 XY，与 shoot 一致；该缓存不因 0.5 秒新鲜度窗口或策略 reset 清空，重新见球后更新。目标方向与 pass/shoot 相同，取机器人坐标系下机器人到球的连线方向 `atan2(ball_y, ball_x)`；目标点取该方向上距机器人 6 米的位置，并乘以训练时的目标缩放 `0.2`。丢球后方向沿用最近一次有效球位置。仓库没有比赛端的场地定位输入，因此该目标点并非定位得到的对方球门中心。首次见球前保持当前关节姿态。无窗口检查：`python -m unittest tests.test_k1_student tests.test_k1_student_sim`。
 
 ### Python 环境
 
@@ -161,6 +161,13 @@ source /opt/booster/BoosterRos2Interface/install/setup.bash
    ```bash
    python scripts/deploy.py --task <TASK_NAME>
    ```
+
+所有实机任务共用 `X/x` 交接流程：先发送当前实测姿态的保持命令，等待 0.1 秒，
+只发送一次切入 Custom 的请求，随后每隔 0.5 秒查询状态、最多查询 20 次。
+确认 Custom 后才开始任务的准备动作；未确认则取消启动并执行退出模式切换。
+恢复测试在交接期间持续发布带反馈保护的姿态保持命令。行走准备、站姿准备、
+头控测试和恢复测试在确认 Custom 后继续各自的准备流程与 `A/r` 操作。
+`start_k1_pass.py`、`start_k1_shoot.py`、`start_k1_student.py` 最终都调用这个实机入口。
 
 #### 实机 PD 阻尼参数（`Kd`）
 

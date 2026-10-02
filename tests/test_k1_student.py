@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -61,8 +62,39 @@ class StudentTests(unittest.TestCase):
         self.assertEqual(policy.frame_count, 2)
         torch.testing.assert_close(policy.obs_history[-1, 55:57],
                                    torch.tensor([0.1988, 0.2986]))
-        torch.testing.assert_close(policy.obs_history[-1, 77:79], torch.zeros(2))
+        torch.testing.assert_close(policy.obs_history[-1, 77:79], torch.tensor([0.6, 0.8]))
         torch.testing.assert_close(policy.obs_history[-1, 79:81], torch.tensor([0.72, 0.96]))
+
+    def test_ball_reference_survives_long_loss_invalid_updates_and_reset(self):
+        policy = self.controller.policy
+        with patch.object(policy, '_forward_model', return_value=torch.zeros(20)) as actor:
+            self.controller.policy_step()
+            self.controller.policy_step()
+            reference = policy.obs_history[-1, 77:81].clone()
+            phase = policy.phase
+            self.ball = None
+            # Outlast both the 0.5 s freshness window and all 50 history frames.
+            for _ in range(60):
+                history = policy.obs_history.clone()
+                self.controller.policy_step()
+                torch.testing.assert_close(policy.obs_history[:-1], history[1:])
+                torch.testing.assert_close(policy.obs_history[-1, 77:81], reference)
+            self.assertEqual(actor.call_count, 62)
+            self.assertEqual(policy.frame_count, 62)
+            self.assertNotAlmostEqual(policy.phase, phase)
+            for invalid in ((float('nan'), 0.), (0., float('inf'))):
+                self.ball = invalid
+                self.controller.policy_step()
+                torch.testing.assert_close(policy.obs_history[-1, 77:81], reference)
+            self.ball = None
+            self.controller.start()
+            self.controller.policy_step()  # preserve the zero first-history contract
+            self.controller.policy_step()
+            torch.testing.assert_close(policy.obs_history[-1, 77:81], reference)
+            self.ball = (0.8, -0.6)
+            self.controller.policy_step()
+            torch.testing.assert_close(policy.obs_history[-1, 77:81],
+                                       torch.tensor([0.8, -0.6, 0.96, -0.72]))
 
     def test_hold_before_first_ball(self):
         self.ball = None

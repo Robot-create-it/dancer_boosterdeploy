@@ -6,13 +6,15 @@ checks exercise the real deployment module but do not validate DDS or firmware.
 
 from copy import deepcopy
 import importlib.util
+from itertools import count
+import pkgutil
 import runpy
 from pathlib import Path
 from threading import Event
 from types import ModuleType, SimpleNamespace
 import unittest
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 import torch
@@ -129,6 +131,163 @@ class RobotConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ROBOT.BoosterRobotPortal(cfg)
                 remote.assert_not_called()
+
+
+class RobotModeSwitchTests(unittest.TestCase):
+    def setUp(self):
+        self.portal = make_portal(K1LocoTaskCfg())
+        self.portal.rpc_service_client = Mock()
+
+    def test_delayed_custom_confirmation_sends_only_one_switch_request(self):
+        custom = ROBOT._RobotModeInt.kCustom
+        replies = [
+            (True, None),
+            (True, {'current_mode': ROBOT._RobotModeInt.kWalking}),
+            (False, None),
+            (True, {'current_mode': custom}),
+        ]
+        with patch.object(self.portal, '_call_booster_rpc', side_effect=replies) as rpc, \
+                patch.object(ROBOT.time, 'sleep'):
+            self.assertTrue(self.portal._change_robot_mode('custom'))
+        self.assertEqual(rpc.call_args_list, [
+            call(ROBOT._LOC_API_CHANGE_MODE, {'mode': custom}),
+            *[call(ROBOT._LOC_API_GET_STATUS)] * 3,
+        ])
+
+    def test_custom_confirmation_timeout_does_not_resend_switch_request(self):
+        def reply(api_id, body=None):
+            if api_id == ROBOT._LOC_API_CHANGE_MODE:
+                return True, None
+            return True, {'current_mode': ROBOT._RobotModeInt.kWalking}
+
+        with patch.object(self.portal, '_call_booster_rpc', side_effect=reply) as rpc, \
+                patch.object(ROBOT.time, 'sleep'):
+            self.assertFalse(self.portal._change_robot_mode('custom'))
+        self.assertEqual(rpc.call_args_list, [
+            call(ROBOT._LOC_API_CHANGE_MODE, {'mode': ROBOT._RobotModeInt.kCustom}),
+            *[call(ROBOT._LOC_API_GET_STATUS)] * 20,
+        ])
+
+    def test_failed_custom_request_is_not_retried(self):
+        with patch.object(self.portal, '_call_booster_rpc', return_value=(False, None)) as rpc:
+            self.assertFalse(self.portal._change_robot_mode('custom'))
+        rpc.assert_called_once_with(
+            ROBOT._LOC_API_CHANGE_MODE, {'mode': ROBOT._RobotModeInt.kCustom},
+        )
+
+    def test_damping_still_retries_when_status_is_delayed(self):
+        damping = ROBOT._RobotModeInt.kDamping
+        replies = [
+            (True, None), (True, {'current_mode': ROBOT._RobotModeInt.kCustom}),
+            (True, None), (True, {'current_mode': damping}),
+        ]
+        with patch.object(self.portal, '_call_booster_rpc', side_effect=replies) as rpc, \
+                patch.object(ROBOT.time, 'sleep'):
+            self.assertTrue(self.portal._change_robot_mode('damping'))
+        self.assertEqual(rpc.call_args_list, [
+            call(ROBOT._LOC_API_CHANGE_MODE, {'mode': damping}),
+            call(ROBOT._LOC_API_GET_STATUS),
+        ] * 2)
+
+
+class CustomHandoffTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import tasks
+        from booster_deploy.utils.registry import list_tasks
+        from tasks.locomotion.robots.k1.shooting import SHOOT_POLICY_IDS, select_shoot_policy
+
+        for module in pkgutil.walk_packages(tasks.__path__, prefix='tasks.'):
+            __import__(module.name)
+        cls.cases = list(list_tasks().items())
+        for name in ('k1_pass', 'k1_shoot', 'k1_student'):
+            cfg = deepcopy(list_tasks()[name])
+            cfg.booster.head_only = True
+            cls.cases.append((name + '/head-only', cfg))
+        cfg = deepcopy(list_tasks()['k1_recovery'])
+        cfg.booster.recovery_hold_only = True
+        cls.cases.append(('k1_recovery/hold-only', cfg))
+        for policy_id in SHOOT_POLICY_IDS:
+            cfg = deepcopy(list_tasks()['k1_shoot'])
+            select_shoot_policy(cfg, policy_id)
+            cls.cases.append(('k1_shoot/' + policy_id, cfg))
+
+    def check_handoff(self, cfg, *, confirm):
+        cfg = deepcopy(cfg)
+        # The deploy entry loads camera intrinsics before constructing a
+        # vision task. Supply a calibrated-intrinsics fixture for this test.
+        cfg.booster.head_tracking.fx = cfg.booster.head_tracking.fy = 320.
+        portal = make_portal(cfg)
+        self.addCleanup(setattr, portal, '_cleanup_done', True)
+        portal.low_state_received_event.set()
+        portal.rpc_service_client = Mock()
+        state = portal.synced_state.read()
+        state[0]['joint_pos'] += .05
+        initial = state[0]['joint_pos'].copy()
+        portal.synced_state.write(state)
+        events, commands = [], []
+
+        def trigger():
+            self.assertFalse(commands)
+            events.append('x')
+            return True
+
+        def publish(message):
+            commands.append([(m.q, m.dq, m.tau, m.kp, m.kd) for m in message.motor_cmd])
+            events.append('hold')
+
+        def guarded_hold():
+            gains = portal.cfg.robot.prepare_state
+            return portal._publish_recovery_target(initial, gains.stiffness, gains.damping)
+
+        status_reads = 0
+
+        def rpc(api_id, body=None):
+            nonlocal status_reads
+            self.assertTrue(commands, 'hold must arrive before requesting Custom')
+            if api_id == ROBOT._LOC_API_CHANGE_MODE:
+                events.append('custom')
+                self.assertEqual(body, {'mode': ROBOT._RobotModeInt.kCustom})
+                return True, None
+            self.assertEqual(api_id, ROBOT._LOC_API_GET_STATUS)
+            events.append('status')
+            status_reads += 1
+            mode = ROBOT._RobotModeInt.kCustom if confirm and status_reads >= 3 else ROBOT._RobotModeInt.kWalking
+            return True, {'current_mode': mode}
+
+        portal.remoteControlService.start_custom_mode.side_effect = trigger
+        portal.low_cmd_publisher.publish.side_effect = publish
+        with patch.object(portal, '_wait_recovery_ready', return_value=True), \
+                patch.object(portal, '_start_recovery_hold', side_effect=guarded_hold), \
+                patch.object(portal, '_call_booster_rpc', side_effect=rpc), \
+                patch.object(ROBOT.time, 'sleep'), \
+                patch.object(ROBOT.time, 'perf_counter', side_effect=count(0., 2.)):
+            self.assertEqual(portal.start_custom_mode_conditionally(), confirm)
+        self.assertEqual(events[:3], ['x', 'hold', 'custom'])
+        self.assertEqual(events.count('custom'), 1)
+        self.assertEqual(status_reads, 3 if confirm else 20)
+        np.testing.assert_allclose(np.array(commands[0])[:, 0], initial)
+        np.testing.assert_allclose(np.array(commands[0])[:, 1:3], 0.)
+        np.testing.assert_allclose(np.array(commands[0])[:, 3], portal.cfg.robot.prepare_state.stiffness)
+        np.testing.assert_allclose(np.array(commands[0])[:, 4], portal.cfg.robot.prepare_state.damping)
+        if not confirm:
+            self.assertEqual(len(commands), 1, 'no preparation motion before Custom confirmation')
+        elif portal.cfg.robot.prepare_mode == 'standing':
+            self.assertEqual(events[3:6], ['status'] * 3)
+            np.testing.assert_allclose(np.array(commands[1])[:, 0], initial)
+        else:
+            self.assertEqual(len(commands), 1)
+        portal.remoteControlService.start_rl_gait.assert_not_called()
+
+    def test_every_deploy_task_preloads_pose_then_requests_custom_once(self):
+        for name, cfg in self.cases:
+            with self.subTest(task=name):
+                self.check_handoff(cfg, confirm=True)
+
+    def test_every_deploy_task_stops_preparation_if_custom_is_unconfirmed(self):
+        for name, cfg in self.cases:
+            with self.subTest(task=name):
+                self.check_handoff(cfg, confirm=False)
 
 
 class RobotInferenceTests(unittest.TestCase):

@@ -76,7 +76,7 @@ class BoosterRobotControllerCfg:
     joint_stiffness: Optional[List[float]] = None
     joint_damping: Optional[List[float]] = None
     head_tracking: HeadTrackingCfg = HeadTrackingCfg()
-    head_only: bool = False  # keep the zero-command preparation policy running
+    head_only: bool = False  # hold default stance and track the head without an actor
     control_head: bool = False  # task supplies head targets; send weight=1
     recovery_safety: bool = False  # K1-specific feedback and command checks
     recovery_hold_only: bool = False  # validation: A/r cannot start the policy

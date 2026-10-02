@@ -50,8 +50,9 @@ class K1StudentPolicy(LocomotionPolicy):
         fresh_ball = self.controller.get_ball_position(self.cfg.ball_max_age)
         remembered_ball = self.ball_memory.update(fresh_ball)
         ball = torch.zeros(2, dtype=torch.float32, device=self.device)
-        if fresh_ball is not None:
-            ball[:] = torch.as_tensor(fresh_ball, dtype=torch.float32, device=self.device)
+        if remembered_ball is not None:
+            # Match shoot: missing observations keep the last valid raw XY.
+            ball[:] = torch.as_tensor(remembered_ball, dtype=torch.float32, device=self.device)
         goal = torch.zeros_like(ball)
         if remembered_ball is not None:
             bx, by = remembered_ball
@@ -107,7 +108,7 @@ class K1StudentPolicyCfg(K1LocomotionPolicyCfg):
     target_distance: float = 6.0
     ball_pos_scale: float = 1.0
     goal_pos_scale: float = 0.2
-    ball_max_age: float = 0.5
+    ball_max_age: float = 0.5  # new observations only; cached XY does not expire
     clip_action: float = 1.0
     action_scale: float = 1.0
     action_filter: float = 1.0

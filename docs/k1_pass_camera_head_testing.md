@@ -91,8 +91,8 @@ python scripts/start_k1_pass.py --vision-only --vision-config /opt/booster
 默认 D-Robotics + use_depth=true 时，检查这四个输入持续更新：
 
 ```text
-/StereoNetNode/rectified_image
-/StereoNetNode/stereonet_depth
+/boostercamera/head/rgb
+/boostercamera/head/depth
 /head_pose
 /booster_vision/detection
 ```
@@ -170,15 +170,15 @@ Ctrl+C 只停止查看器，原来的运控和视觉进程继续运行。
 
 ## 5. 只联调头部（会运行 loco 支撑身体，不运行 pass）
 
-先保证机器人处于可进行原 loco 测试的受控环境，有人能够随时停止。
-本模式是“头部加零速度 loco”，不是仅给两个头部电机上电。
+先保证机器人处于可保持站姿的受控环境，有人能够随时停止。停止其他会发送运动命令的程序（包括比赛 brain），避免并行控制。
+本模式将身体平滑过渡到当前任务的 `default_joint_pos`，随后保持固定站姿，只更新头部目标；不加载或推理 base/side/turn、student、pass 或 shoot 模型。身体仍通过位置 PD 保持，不提供行走策略的动态平衡。
 
 ```bash
 python scripts/start_k1_pass.py --head-only --vision-config /opt/booster
 ```
 
-1. 完成输入检查后，沿用 deploy 的 **X / 键盘 x** 进入 Custom 和行走准备。
-2. 此时头部功能启用。**A / r 被禁用，不会切入 pass**；身体速度命令维持零。
+1. 完成输入检查后，**X / 键盘 x** 进入 Custom，身体用约 1 秒平滑过渡到当前任务默认站姿，头部保留进入时角度。
+2. 随后头部功能启用。**A / r 被禁用，不会切入身体策略**；手臂和腿部始终保持默认站姿目标。
 3. 遮住球：超过短时保持后，日志应进入 `Head tracker: scan`，头部平滑扫描。
 4. 在画面边缘出现球：日志应进入 `track`。球在画面右边时头向右，球在下方时头向下。
    球进入中心容差区域后，头部保持；demo 的容差较宽，不要求球总在精确中心。

@@ -93,7 +93,7 @@ def main(task="k1_pass"):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-only", action="store_true", help="Read-only check; starts no camera, vision or motion processes")
     mode.add_argument("--vision-only", action="store_true", help="Start/reuse vision and print ball positions; no motion")
-    mode.add_argument("--head-only", action="store_true", help="Run zero-command loco plus head; never activate the kick policy")
+    mode.add_argument("--head-only", action="store_true", help="Hold the default body stance and track the head; no locomotion/kick model")
     args = parser.parse_args()
     if not (args.check_only or args.vision_only):
         from booster_deploy.utils.robot_runtime import require_robot_interface
@@ -108,8 +108,6 @@ def main(task="k1_pass"):
             parser.error("--camera-driver realsense requires a realsense calibration configuration")
         color, depth = "/boostercamera/head/color/image_raw", "/boostercamera/head/aligned_depth_to_color/image_raw"
     color, depth = args.color_topic or color, args.depth_topic or depth
-    if config["camera"]["type"] == "d-robotics" and (color, depth) != camera_topics(config):
-        parser.error("D-Robotics uses the platform topics specified by the demo configuration")
 
     import rclpy
     rclpy.init()

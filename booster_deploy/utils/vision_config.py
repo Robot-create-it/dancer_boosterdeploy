@@ -26,7 +26,5 @@ def load_vision_config(directory):
 
 
 def camera_topics(config):
-    if config["camera"]["type"] == "d-robotics":
-        color = "/StereoNetNode/rectified_image" if config.get("use_depth", False) else "/image_left_raw"
-        return color, "/StereoNetNode/stereonet_depth"
+    # The platform camera publishes these topics regardless of sensor type.
     return "/boostercamera/head/rgb", "/boostercamera/head/depth"

@@ -1,6 +1,7 @@
 """Exercise vision freshness and head targets without ROS or physical motion."""
 
 from dataclasses import replace
+from itertools import count
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,8 @@ from booster_deploy.utils.head_ball_tracker import HeadBallTracker
 from booster_deploy.utils.vision_ball import BallObservation, select_ball_observation
 from booster_deploy.utils.vision_config import load_vision_config, camera_topics
 from tasks.locomotion.robots.k1.passing import K1PassTaskCfg
+from tasks.locomotion.robots.k1.shooting import K1ShootTaskCfg
+from tasks.locomotion.robots.k1.student import K1StudentTaskCfg
 from test_k1_loco_robot import ROBOT, make_portal
 
 
@@ -78,7 +81,7 @@ class VisionFreshnessTests(unittest.TestCase):
             (p/'vision_local.yaml').write_text('camera:\n  intrin: {fx: 202}\n')
             cfg = load_vision_config(p)
             self.assertEqual(cfg['camera']['intrin'], {'fx': 202, 'fy': 201})
-            self.assertEqual(camera_topics(cfg)[0], '/StereoNetNode/rectified_image')
+            self.assertEqual(camera_topics(cfg), ('/boostercamera/head/rgb', '/boostercamera/head/depth'))
 
 
 class HeadControllerTests(unittest.TestCase):
@@ -184,6 +187,98 @@ class HeadControllerTests(unittest.TestCase):
             portal.run()
         self.assertFalse(portal.task_start_event.is_set())
         self.assertFalse(portal.velocity_commands_enabled_event.is_set())
+        portal.start_rl_gait_conditionally.assert_called_once_with(wait_for_trigger=False)
+
+
+class HeadOnlyStandTests(unittest.TestCase):
+    def make_head_portal(self, task):
+        cfg = task()
+        cfg.booster.head_only = True
+        cfg.booster.head_tracking.fx = cfg.booster.head_tracking.fy = 320.
+        portal = make_portal(cfg)
+        self.addCleanup(setattr, portal, '_cleanup_done', True)
+        return cfg, portal
+
+    def test_all_head_only_tasks_hold_default_body_without_loading_models(self):
+        for task in (K1PassTaskCfg, K1ShootTaskCfg, K1StudentTaskCfg):
+            with self.subTest(task=task.__name__):
+                original, portal = self.make_head_portal(task)
+                with patch('tasks.locomotion.locomotion.create_policy_runner',
+                           side_effect=AssertionError('head-only must not load a model')):
+                    controller = ROBOT.BoosterRobotController(portal.cfg, portal)
+                    controller.update_state()
+                    controller.start()
+                    # Moving feedback and head targets cannot change the body target.
+                    for n in range(3):
+                        state = portal.synced_state.read()
+                        state[0]['joint_pos'][2:] += .1
+                        state[0]['joint_pos'][1] = .4
+                        portal.synced_state.write(state)
+                        controller.update_state()
+                        controller.ctrl_step(controller.policy_step())
+                        torch.testing.assert_close(
+                            torch.tensor([m.q for m in portal.motor_cmd[2:]]),
+                            controller.robot.default_joint_pos[2:])
+                    self.assertEqual(portal.head_tracker.state, 'hold')
+                self.assertAlmostEqual(portal.motor_cmd[1].q, .4)
+                self.assertIsNone(controller.vel_command)
+                self.assertEqual(portal.cfg.robot.prepare_mode, 'standing')
+                self.assertEqual(portal.cfg.robot.prepare_state.stiffness,
+                                 portal.cfg.robot.joint_stiffness)
+                self.assertEqual(portal.cfg.robot.prepare_state.damping,
+                                 portal.cfg.robot.joint_damping)
+                self.assertIsNot(original.policy.constructor, ROBOT.HeadOnlyStandPolicy)
+                self.assertEqual(original.robot.prepare_mode, 'walking')
+
+    def test_head_tracking_changes_only_head_during_stance_hold(self):
+        _, portal = self.make_head_portal(K1StudentTaskCfg)
+        portal._vision_node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=100_000_000_000)))
+        state = portal.synced_vision_state.read()
+        state[0]['width'], state[0]['height'] = 640, 480
+        state[0]['image_received'] = state[0]['pose_received'] = 20.
+        portal.synced_vision_state.write(state)
+        controller = ROBOT.BoosterRobotController(portal.cfg, portal)
+        controller.update_state()
+        controller.robot.data.joint_pos[1] = .4
+        controller.start()
+        with patch.object(ROBOT.time, 'monotonic', return_value=20.):
+            portal._vision_handler(detection())
+            controller.ctrl_step(controller.policy_step())
+        self.assertLess(portal.motor_cmd[0].q, 0.)
+        self.assertGreater(portal.motor_cmd[1].q, .4)
+        torch.testing.assert_close(torch.tensor([m.q for m in portal.motor_cmd[2:]]),
+                                   controller.robot.default_joint_pos[2:])
+
+    def test_x_interpolates_body_and_starts_hold_without_a_or_loco(self):
+        _, portal = self.make_head_portal(K1StudentTaskCfg)
+        portal.remoteControlService.start_custom_mode.return_value = True
+        portal.low_state_received_event.set()
+        state = portal.synced_state.read()
+        state[0]['joint_pos'] += .1
+        initial = state[0]['joint_pos'].copy()
+        portal.synced_state.write(state)
+        portal._change_robot_mode = Mock(return_value=True)
+        commands = []
+        portal.low_cmd_publisher.publish.side_effect = lambda msg: commands.append(
+            [m.q for m in msg.motor_cmd])
+        clock = count(step=.003)
+        with patch.object(ROBOT.time, 'sleep'), \
+                patch.object(ROBOT.time, 'perf_counter', side_effect=lambda: next(clock)):
+            self.assertTrue(portal.start_custom_mode_conditionally())
+        torch.testing.assert_close(torch.tensor(commands[0], dtype=torch.float32), torch.tensor(initial, dtype=torch.float32))
+        torch.testing.assert_close(torch.tensor(commands[-1][2:], dtype=torch.float32),
+                                   portal.robot.default_joint_pos[2:])
+        for q in commands:
+            self.assertAlmostEqual(q[0], initial[0])
+            self.assertAlmostEqual(q[1], initial[1])
+        with patch.object(ROBOT.mp, 'Process') as process, \
+                patch.object(portal, '_build_prepare_cfg', side_effect=AssertionError('no loco')):
+            self.assertTrue(portal.start_rl_gait_conditionally(wait_for_trigger=False))
+            self.assertFalse(process.call_args.kwargs['args'][2])
+            self.assertIs(process.call_args.kwargs['args'][0].policy.constructor,
+                          ROBOT.HeadOnlyStandPolicy)
+        portal.remoteControlService.start_rl_gait.assert_not_called()
 
 
 if __name__ == '__main__':

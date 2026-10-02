@@ -29,7 +29,7 @@ parser.add_argument(
     help="Directory containing the robot's vision.yaml and optional vision_local.yaml",
 )
 parser.add_argument("--head-only", action="store_true",
-                    help="K1 visual kick: remain in zero-command loco preparation and test head tracking")
+                    help="K1 head tracking with a fixed default body stance; no locomotion/kick model")
 parser.add_argument("--color-topic", default=None, help="Override pass camera image topic")
 parser.add_argument("--no-head-tracking", action="store_true",
                     help="Disable automatic head targets for diagnosis")
@@ -139,7 +139,7 @@ def main():
         if args.color_topic:
             head.color_topic = args.color_topic
         if args.head_only:
-            print("HEAD TEST: X starts zero-command loco and head tracking. A/r will NOT start the kick policy.")
+            print("HEAD TEST: X moves smoothly to the default stance and starts head tracking. A/r is disabled; no body policy runs.")
 
     # decide how to run based on flags
     if args.mujoco:

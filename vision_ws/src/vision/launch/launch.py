@@ -38,6 +38,9 @@ def handle_configuration(context, *args, **kwargs):
             remappings=[
                 ('/boostercamera/head/rgb', LaunchConfiguration('color_topic')),
                 ('/boostercamera/head/depth', LaunchConfiguration('depth_topic')),
+                ('/StereoNetNode/rectified_image', LaunchConfiguration('color_topic')),
+                ('/image_left_raw', LaunchConfiguration('color_topic')),
+                ('/StereoNetNode/stereonet_depth', LaunchConfiguration('depth_topic')),
             ],
             arguments=[config_file, config_local_file],
             parameters=[{

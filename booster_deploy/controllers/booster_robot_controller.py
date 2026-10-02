@@ -45,6 +45,19 @@ logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
 
 
+class HeadOnlyStandPolicy:
+    """Fixed default posture; head tracking is applied by ctrl_step, without a model."""
+
+    def __init__(self, cfg, controller):
+        self.robot = controller.robot
+
+    def reset(self):
+        pass
+
+    def inference(self):
+        return self.robot.default_joint_pos.clone()
+
+
 class BoosterRobotPortal:
     synced_state: SyncedArray
     synced_command: SyncedArray
@@ -56,6 +69,17 @@ class BoosterRobotPortal:
         # Keep the registered task's simulation configuration intact.
         self.cfg = deepcopy(cfg)
         self.cfg.robot = self.cfg.booster.apply_to_robot(self.cfg.robot)
+        if self.cfg.booster.head_only:
+            # Enter the task's default stance smoothly, with the same gains
+            # during preparation and holding. No walking/kick actor is loaded.
+            self.cfg.robot.prepare_mode = "standing"
+            self.cfg.robot.prepare_state = self.cfg.robot.prepare_state.replace(
+                joint_pos=list(self.cfg.robot.default_joint_pos),
+                stiffness=list(self.cfg.robot.joint_stiffness),
+                damping=list(self.cfg.robot.joint_damping),
+            )
+            self.cfg.policy.constructor = HeadOnlyStandPolicy
+            self.cfg.vel_command = None
         if self.cfg.booster.recovery_safety:
             if self.cfg.robot.name != 'Booster_K1' or self.cfg.robot.prepare_mode != 'hold':
                 raise ValueError('Recovery safety requires K1 hold preparation')
@@ -504,13 +528,20 @@ class BoosterRobotPortal:
             "Walking" if expected_mode == _RobotModeInt.kWalking
             else normalized.capitalize()
         )
-        for _ in range(20):
+        for attempt in range(20):
             if self.cfg.booster.recovery_safety and normalized != 'damping' and self.exit_event.is_set():
                 return False
-            ok, _ = self._call_booster_rpc(
-                _LOC_API_CHANGE_MODE,
-                {"mode": expected_mode},
-            )
+            # Re-entering Custom resets the retained joint command and can
+            # trigger the firmware's ready-pose transition. Send its request
+            # once, then poll status while the asynchronous switch completes.
+            if attempt == 0 or normalized != 'custom':
+                ok, _ = self._call_booster_rpc(
+                    _LOC_API_CHANGE_MODE,
+                    {"mode": expected_mode},
+                )
+                if normalized == 'custom' and not ok:
+                    self.logger.error("Custom mode request failed; refusing to resend it")
+                    return False
             if ok:
                 status_ok, status = self._call_booster_rpc(
                     _LOC_API_GET_STATUS
@@ -651,9 +682,13 @@ class BoosterRobotPortal:
         prepare_state = self.robot.cfg.prepare_state
         for i in range(self.robot.num_joints):
             self.motor_cmd[i].q = float(joint_pos[i])
+            self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].kp = float(prepare_state.stiffness[i])
             self.motor_cmd[i].kd = float(prepare_state.damping[i])
             self.motor_cmd[i].tau = 0.0
+        if self.cfg.booster.control_head:
+            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
+                self.motor_cmd[self.robot.cfg.joint_names.index(name)].weight = 1.0
         # The low-level controller keeps this command when Custom is entered,
         # until the locomotion policy publishes its first action.
         self.low_cmd_publisher.publish(self.low_cmd)
@@ -684,19 +719,13 @@ class BoosterRobotPortal:
                 return False
             if not self._start_recovery_hold():
                 return False
-            # Keep publishing through RPC retries, waiting for A and model loading.
-            time.sleep(0.1)
-            if not self._change_robot_mode('custom') or self.exit_event.is_set():
-                self._stop_recovery_hold()
-                return False
-            self.logger.info('Custom mode started; publishing guarded hold at %.1f Hz',
-                             1.0 / self.cfg.policy_dt)
-            return True
 
-        # Python-side walking preparation is allowed only from an upright
+        # Walking preparation and the head-only stance require an upright
         # posture.  This is a single check at the X trigger; interpolation
         # itself intentionally has no additional posture checks.
-        if self.cfg.robot.prepare_mode.strip().lower() == "walking":
+        if not self.cfg.booster.recovery_safety and (
+            self.cfg.robot.prepare_mode.strip().lower() == "walking" or self.cfg.booster.head_only
+        ):
             state = self.synced_state.read()[0]
             rpy = torch.from_numpy(state["root_rpy_w"]).to(dtype=torch.float32)
             projected_gravity = lab_math.quat_apply_inverse(
@@ -705,7 +734,7 @@ class BoosterRobotPortal:
             )
             if projected_gravity[2] > -0.5:
                 self.logger.error(
-                    "Refusing walk preparation: robot posture is unsafe "
+                    "Refusing preparation: robot posture is unsafe "
                     "(projected_gravity[2]=%.3f). Switching to damping mode.",
                     float(projected_gravity[2]),
                 )
@@ -713,64 +742,52 @@ class BoosterRobotPortal:
                 self._change_robot_mode("damping")
                 return False
 
-            while rclpy.ok() and self.low_cmd_publisher.get_subscription_count() == 0:
+        if not self.cfg.booster.recovery_safety:
+            while (
+                rclpy.ok() and not self.exit_event.is_set()
+                and self.low_cmd_publisher.get_subscription_count() == 0
+            ):
                 self.logger.info("Waiting for '/joint_ctrl' subscriber, retry in 0.5s")
                 time.sleep(0.5)
-
-            # Match standing preparation's hold position and PVT-style PD
-            # gains.  Locomotion takes over only after Custom is entered.
-            # Send exactly one command while PVT still owns the robot; the
-            # low-level controller retains it across the Custom transition.
-            self._prime_custom_command()
-            # Give the low-level/PVT path time to receive and retain the
-            # non-zero-gain hold command before relinquishing control.
-            time.sleep(0.1)
-
-            # The Python locomotion policy publishes joint_ctrl commands.  The
-            # robot must be in Custom mode for those commands to be accepted;
-            # merely starting the inference process leaves a robot that was in
-            # PVT mode under the previous controller.
-            if not self._change_robot_mode("custom"):
-                self.logger.error(
-                    "Failed to switch to Custom mode for walking preparation"
-                )
+            if not rclpy.ok() or self.exit_event.is_set():
                 return False
+            # All preparation modes preload the measured pose before Custom.
+            # Recovery instead publishes its guarded hold continuously.
+            self._prime_custom_command()
 
-            # Walking preparation uses the Python locomotion policy directly;
-            # do not run the PVT interpolation.
-            self.logger.info(
-                "Walking preparation accepted; starting zero-command locomotion"
-            )
-            return True
-
-        while rclpy.ok() and self.low_cmd_publisher.get_subscription_count() == 0:
-            self.logger.info("Waiting for '/joint_ctrl' subscriber, retry in 0.5s")
-            time.sleep(0.5)
-
-        self.logger.info("Subscriber found, starting control loop")        
-
-        prepare_state = self.robot.cfg.prepare_state
-        init_joint_pos = self.synced_state.read()[0]['joint_pos']
-        for i in range(self.robot.num_joints):
-            self.motor_cmd[i].q = init_joint_pos[i]
-            self.motor_cmd[i].kp = float(prepare_state.stiffness[i])
-            self.motor_cmd[i].kd = float(prepare_state.damping[i])
-        if self.cfg.booster.control_head:
-            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
-                self.motor_cmd[self.robot.cfg.joint_names.index(name)].weight = 1.0
-
-        self.low_cmd_publisher.publish(self.low_cmd)
+        # One shared handoff for locomotion, standing/head tests and recovery:
+        # allow the hold command to arrive, then request Custom once and poll.
         time.sleep(0.1)
-
-        if not self._change_robot_mode("custom"):
+        if self.exit_event.is_set():
+            self._stop_recovery_hold()
+            return False
+        if not self._change_robot_mode("custom") or self.exit_event.is_set():
+            self._stop_recovery_hold()
             self.logger.error("Failed to switch to Custom mode")
             return False
+
+        if self.cfg.booster.recovery_safety:
+            self.logger.info('Custom mode started; publishing guarded hold at %.1f Hz',
+                             1.0 / self.cfg.policy_dt)
+            return True
+
+        if self.cfg.robot.prepare_mode.strip().lower() == "walking":
+            self.logger.info("Walking preparation accepted; starting zero-command locomotion")
+            return True
 
         if self.cfg.robot.prepare_mode.strip().lower() == "hold":
             self.logger.info("Custom mode started; holding measured pose until A/r")
             return True
 
+        prepare_state = self.robot.cfg.prepare_state
+        # Start interpolation at the pose already preloaded into Custom.
+        init_joint_pos = np.array([motor.q for motor in self.motor_cmd])
         trans = np.linspace(init_joint_pos, prepare_state.joint_pos, num=500)
+        if self.cfg.booster.head_only:
+            # Do not move the head to the body's nominal pose before tracking.
+            for name in ("aahead_yaw_joint", "aahead_pitch_joint"):
+                i = self.robot.cfg.joint_names.index(name)
+                trans[:, i] = init_joint_pos[i]
         start_time = time.perf_counter()
         for i in range(500):
             for j in range(self.robot.num_joints):
@@ -778,10 +795,6 @@ class BoosterRobotPortal:
             self.low_cmd_publisher.publish(self.low_cmd)
             while time.perf_counter() < start_time + (i + 1) * 0.002:
                 time.sleep(0.0002)
-        if self.cfg.robot.prepare_mode.strip().lower() == "walking":
-            self.logger.info(
-                "Prepare pose reached; starting Python RL walking with zero commands"
-            )
         self.logger.info("Custom mode started, initialized with prepare pose")
         return True
 
@@ -855,6 +868,7 @@ class BoosterRobotPortal:
         process_cfg = self.cfg
         prepare_then_task = (
             self.cfg.robot.prepare_mode.strip().lower() == "walking"
+            and not self.cfg.booster.head_only
         )
         if prepare_then_task:
             process_cfg = self._build_prepare_cfg()
@@ -973,14 +987,14 @@ class BoosterRobotPortal:
         if not self.start_custom_mode_conditionally():
             print("Custom mode initialization cancelled.")
         elif not self.start_rl_gait_conditionally(
-            wait_for_trigger=prepare_mode in ("standing", "hold")
+            wait_for_trigger=prepare_mode in ("standing", "hold") and not self.cfg.booster.head_only
         ):
             print("RL mode initialization cancelled.")
         else:
+            if self.cfg.booster.head_only:
+                print("Head test active: holding default stance; A/r is disabled. Ctrl+C exits.")
             if prepare_mode == "walking":
-                if self.cfg.booster.head_only:
-                    print("Head test active: zero-command loco; A/r is disabled. Ctrl+C exits.")
-                else:
+                if not self.cfg.booster.head_only:
                     print(f"{self.remoteControlService.get_rl_gait_operation_hint()}")
             # main loop: wait for exit signal
             while self.is_running and not self.exit_event.is_set():
