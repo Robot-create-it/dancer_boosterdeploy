@@ -134,4 +134,6 @@ class K1PassMujocoController(MujocoController):
             dof_targets = dof_targets.clone()
             for index, value in zip(indices, target):
                 dof_targets[index] = value
+            if hasattr(self.policy, "set_head_target"):
+                self.policy.set_head_target(target)
         super().ctrl_step(dof_targets)

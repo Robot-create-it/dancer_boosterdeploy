@@ -12,6 +12,8 @@ group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
 
 parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
+parser.add_argument("--print-speed", action="store_true",
+                    help="--mujoco: print measured planar speed every 0.5 simulated seconds")
 parser.add_argument("--recovery-posture", choices=("faceup", "facedown"),
                     help="k1_recovery --mujoco: initial lying posture (default: facedown)")
 parser.add_argument("--recovery-log", metavar="JSONL",
@@ -19,7 +21,7 @@ parser.add_argument("--recovery-log", metavar="JSONL",
 parser.add_argument("--recovery-hold-only", action="store_true",
                     help="k1_recovery hardware: X starts guarded pose hold; A/r never starts getup")
 parser.add_argument("--ball-pos", type=float, nargs=2, metavar=("X", "Y"),
-                    help="k1_pass/k1_shoot --mujoco: initial ball centre in world XY (metres)")
+                    help="k1_pass/k1_shoot/k1_student --mujoco: initial ball centre in world XY (metres)")
 parser.add_argument("--shoot-policy", choices=("2", "264", "192", "0109_0", "0109_2"),
                     help="k1_shoot: choose the fixed shoot model by filename suffix (default: 2)")
 parser.add_argument(
@@ -44,6 +46,8 @@ args = parser.parse_args()
 
 
 def main():
+    if args.print_speed and not args.mujoco:
+        parser.error("--print-speed requires --mujoco")
     if args.recovery_hold_only and (args.task != "k1_recovery" or args.mujoco):
         parser.error('--recovery-hold-only requires hardware --task k1_recovery')
     if args.recovery_hold_only and args.recovery_log is not None:
@@ -112,19 +116,20 @@ def main():
     if args.task == "k1_recovery" and args.mujoco and args.recovery_posture == "faceup":
         task_cfg.mujoco.init_quat[2] *= -1
     task_cfg.policy.device = args.device
+    task_cfg.mujoco.print_speed = args.print_speed
     if args.exit_mode is not None:
         task_cfg.booster.exit_mode = args.exit_mode
-    if args.head_only and (args.task not in ("k1_pass", "k1_shoot") or args.mujoco):
-        parser.error("--head-only requires real-robot --task k1_pass or k1_shoot")
+    if args.head_only and (args.task not in ("k1_pass", "k1_shoot", "k1_student") or args.mujoco):
+        parser.error("--head-only requires real-robot --task k1_pass, k1_shoot or k1_student")
     if args.ball_pos is not None:
         import math
-        if args.task not in ("k1_pass", "k1_shoot") or not args.mujoco or not all(map(math.isfinite, args.ball_pos)):
-            parser.error("--ball-pos requires k1_pass/k1_shoot --mujoco and two finite coordinates")
+        if args.task not in ("k1_pass", "k1_shoot", "k1_student") or not args.mujoco or not all(map(math.isfinite, args.ball_pos)):
+            parser.error("--ball-pos requires k1_pass/k1_shoot/k1_student --mujoco and two finite coordinates")
         task_cfg.mujoco.ball_init_xy = args.ball_pos
     task_cfg.booster.head_only = args.head_only
     if args.no_head_tracking:
         task_cfg.booster.head_tracking.enabled = False
-    if args.task in ("k1_pass", "k1_shoot") and not args.mujoco:
+    if args.task in ("k1_pass", "k1_shoot", "k1_student") and not args.mujoco:
         from booster_deploy.utils.vision_config import load_vision_config, camera_topics
         config = load_vision_config(args.vision_config)
         head = task_cfg.booster.head_tracking
@@ -145,6 +150,9 @@ def main():
         elif args.task == "k1_shoot":
             from booster_deploy.controllers.k1_shoot_mujoco_controller import K1ShootMujocoController
             K1ShootMujocoController(task_cfg).run()
+        elif args.task == "k1_student":
+            from booster_deploy.controllers.k1_student_mujoco_controller import K1StudentMujocoController
+            K1StudentMujocoController(task_cfg).run()
         else:
             from booster_deploy.controllers.mujoco_controller import MujocoController
             MujocoController(task_cfg).run()

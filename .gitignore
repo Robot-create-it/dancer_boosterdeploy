@@ -18,6 +18,8 @@ tasks/**/motions/*
 !tasks/locomotion/robots/k1/models/pass/k1_passing_policy_2.onnx
 !tasks/locomotion/robots/k1/models/shoot/
 !tasks/locomotion/robots/k1/models/shoot/*.onnx
+!tasks/locomotion/robots/k1/models/student/
+!tasks/locomotion/robots/k1/models/student/model_10000_student_body20_slow.onnx
 !tasks/locomotion/robots/k1/models/recovery/
 !tasks/locomotion/robots/k1/models/recovery/*.onnx
 !tasks/locomotion/robots/k1/models/recovery/*.json

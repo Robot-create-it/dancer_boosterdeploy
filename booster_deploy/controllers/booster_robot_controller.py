@@ -114,7 +114,8 @@ class BoosterRobotPortal:
     def _init_synced_buffer(self):
         from tasks.locomotion.k1_pass import K1PassPolicyCfg
         from tasks.locomotion.k1_shoot import K1ShootPolicyCfg
-        self._vision_pass_enabled = isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg))
+        from tasks.locomotion.k1_student import K1StudentPolicyCfg
+        self._vision_pass_enabled = isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg, K1StudentPolicyCfg))
         self.head_tracker = None
         if self.cfg.booster.head_tracking.enabled:
             self.head_tracker = HeadBallTracker(self.cfg.booster.head_tracking)
@@ -797,12 +798,13 @@ class BoosterRobotPortal:
             from tasks.locomotion.nested_locomotion import K1NestedLocomotionPolicyCfg
             from tasks.locomotion.k1_pass import K1PassPolicyCfg
             from tasks.locomotion.k1_shoot import K1ShootPolicyCfg
+            from tasks.locomotion.k1_student import K1StudentPolicyCfg
             if isinstance(self.cfg.policy, K1NestedLocomotionPolicyCfg):
                 # Keep the selected loco models, pose and gains during zero-command
                 # preparation; do not silently load the old k1_walk.pt checkpoint.
                 walk_cfg = deepcopy(self.cfg)
                 walk_cfg.policy.forced_route = None
-            elif isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg)):
+            elif isinstance(self.cfg.policy, (K1PassPolicyCfg, K1ShootPolicyCfg, K1StudentPolicyCfg)):
                 from tasks.locomotion.robots.k1.loco import K1LocoTaskCfg
                 walk_cfg = K1LocoTaskCfg()
             else:
@@ -1172,6 +1174,8 @@ class BoosterRobotController(BaseController):
             dof_targets = dof_targets.clone()
             for i, value in zip(indices, target):
                 dof_targets[i] = value
+            if hasattr(self.policy, "set_head_target"):
+                self.policy.set_head_target(target)
         for i in range(self.robot.num_joints):
             self.portal.motor_cmd[i].q = float(dof_targets[i].item())
             kp_val = float(self.robot.joint_stiffness[i].item())

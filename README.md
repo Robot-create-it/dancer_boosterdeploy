@@ -70,6 +70,23 @@ python scripts/start_k1_shoot.py --vision-config /opt/booster --shoot-policy 264
 
 实机按与 pass 相同的 X/A 控制流程启动零速度行走准备与 shoot。实机运行需要机器人 ROS 2 和本仓库的 `vision_ws`。上述自动化测试可用 `python -m unittest tests.test_k1_shoot tests.test_k1_shoot_sim` 运行。
 
+### K1 慢速 student
+
+`k1_student` 使用 demo 比赛中的 `model_10000_student_body20_slow.onnx`，以固定速度命令 `(1.0, 0.0, 1.0)` 和 `1.8 Hz` 步频构造观测。每帧 81 维，保留 50 帧历史；首个动作使用全零历史。20 个身体动作按 K1 串行关节顺序写入，头部由 pass/shoot 共用的跟球与扫描器控制。Kp/Kd、默认关节姿态、动作和观测缩放来自 demo 的 `student_body20_rcss_config.json`，仿真与实机使用各自对应的 pass/shoot 传感器路径及 50 Hz 控制链路。
+
+```bash
+# 本地 sim2sim；可用 --ball-pos X Y 设置球的世界坐标
+python scripts/deploy.py --task k1_student --mujoco
+python scripts/deploy.py --task k1_student --mujoco --print-speed
+
+# 实机：依次检查视觉、头控，再用 X/A 启动身体策略
+python scripts/start_k1_student.py --vision-only --vision-config /opt/booster
+python scripts/start_k1_student.py --head-only --vision-config /opt/booster
+python scripts/start_k1_student.py --vision-config /opt/booster
+```
+
+球输入沿用 pass/shoot 的获取路径：仿真只在球进入当前头部相机视野时读取机器人坐标系下的 MuJoCo 球位姿，实机读取新鲜的 `position_projection`；丢球时 student 当前帧的球输入为零。目标方向与 pass/shoot 相同，取机器人坐标系下机器人到球的连线方向 `atan2(ball_y, ball_x)`；目标点取该方向上距机器人 6 米的位置，并乘以训练时的目标缩放 `0.2`。丢球后方向沿用最近一次有效球位置。仓库没有比赛端的场地定位输入，因此该目标点并非定位得到的对方球门中心。首次见球前保持当前关节姿态。无窗口检查：`python -m unittest tests.test_k1_student tests.test_k1_student_sim`。
+
 ### Python 环境
 
 创建并激活本地虚拟环境，然后安装依赖：

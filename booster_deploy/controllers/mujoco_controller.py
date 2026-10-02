@@ -70,7 +70,26 @@ class MujocoController(BaseController):
     def start(self):
         # Clear reference; policy.reset() may set a fresh one.
         self._reference_qpos = None
+        self._speed_last_time = float(self.mj_data.time)
+        self._speed_last_xy = self.mj_data.qpos[:2].copy()
         return super().start()
+
+    def _maybe_print_speed(self) -> None:
+        if not self.cfg.mujoco.print_speed:
+            return
+        now = float(self.mj_data.time)
+        elapsed = now - self._speed_last_time
+        if elapsed < 0.5:
+            return
+        xy = self.mj_data.qpos[:2].copy()
+        vx, vy = (xy - self._speed_last_xy) / elapsed
+        print(
+            f"[MuJoCo] t={now:.2f}s speed={np.hypot(vx, vy):.3f} m/s "
+            f"(vx={vx:.3f}, vy={vy:.3f})",
+            flush=True,
+        )
+        self._speed_last_time = now
+        self._speed_last_xy = xy
 
     def _on_mujoco_key(self, keycode: int) -> None:
         if keycode != ord(" "):
@@ -297,6 +316,7 @@ class MujocoController(BaseController):
             mujoco.mj_step(self.mj_model, self.mj_data)
             dof_pos = self.mj_data.qpos.astype(np.float32)[7:7 + self.robot.num_joints]
             dof_vel = self.mj_data.qvel.astype(np.float32)[6:6 + self.robot.num_joints]
+        self._maybe_print_speed()
 
     def run(self):
         with mujoco.viewer.launch_passive(
