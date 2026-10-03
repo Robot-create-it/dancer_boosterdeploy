@@ -3,12 +3,23 @@
 import unittest
 
 import numpy as np
+import torch
 
 from booster_deploy.controllers.k1_student_mujoco_controller import K1StudentMujocoController
 from tasks.locomotion.robots.k1.student import K1StudentTaskCfg
 
 
 class StudentSimTests(unittest.TestCase):
+    def test_leg_torque_limits_match_demo(self):
+        controller = K1StudentMujocoController(K1StudentTaskCfg())
+        targets = torch.as_tensor(
+            controller.mj_data.qpos[7:29].copy() + 10, dtype=torch.float32
+        )
+        controller.ctrl_step(targets)
+        np.testing.assert_allclose(
+            controller.mj_data.ctrl[10:], [30, 35, 20, 40, 20, 20] * 2
+        )
+
     def test_scene_policy_and_head_control(self):
         controller = K1StudentMujocoController(K1StudentTaskCfg())
         self.assertEqual((controller.mj_model.nq, controller.mj_model.nu), (36, 22))

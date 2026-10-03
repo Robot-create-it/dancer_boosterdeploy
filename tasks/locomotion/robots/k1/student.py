@@ -27,6 +27,7 @@ class K1StudentTaskCfg(ControllerCfg):
         default_joint_pos=_STUDENT["default_dof_pos_22"],
         joint_stiffness=_STUDENT["kp_22"],
         joint_damping=_STUDENT["kd_22"],
+        effort_limit=_STUDENT["torque_limit_22"],
         prepare_state=_ROBOT.prepare_state.replace(joint_pos=_STUDENT["default_dof_pos_22"]),
     )
     policy = K1StudentPolicyCfg(

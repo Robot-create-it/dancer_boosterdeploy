@@ -1,7 +1,7 @@
 {
   "source_checkpoint": "/home/yiranwang/ZJUDancer/dancer-mjlab/runs/visualkick/lowflight-stage3/model_10000.pth",
   "source_config": "/home/yiranwang/ZJUDancer/dancer-mjlab/runs/visualkick/lowflight-stage3/config.yaml",
-  "notes": "Slow student policy parameters from the demo rcss config. The deployment task uses these PD gains and pose; simulator effort limits follow the existing pass/shoot K1 controller.",
+  "notes": "Slow student policy parameters from the demo rcss config. The deployment task uses these PD gains, pose, and simulator torque limits.",
   "model_file": "student/model_10000_student_body20_slow.onnx",
   "hist_len": 50,
   "frame_dim": 81,
